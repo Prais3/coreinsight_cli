@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "coreinsight-cli"
+version = "0.1.0"
+description = "HPC Profiler CLI - AI Hardware Level Optimization"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "rich",
+    "docker",
+    "tree-sitter-languages",
+    "langchain",
+    "langchain-core",
+    "langchain-ollama",
+    "langchain-google-genai",
+    "langchain-openai",
+    "langchain-anthropic",
+    "pydantic"
+]
+
+[project.scripts]
+coreinsight = "coreinsight.main:main_cli"
