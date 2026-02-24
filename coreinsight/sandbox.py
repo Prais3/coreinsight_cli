@@ -15,6 +15,7 @@ class CodeSandbox:
             logger.error(f"Failed to connect to Docker daemon: {e}")
             self.client = None
 
+    # TODO: 10 seconds is too low - either increase or find a different solution.
     def execute_benchmark(self, code: str, language: str = "cpp", timeout_seconds: int = 10) -> Tuple[bool, str]:
         """
         Compiles and runs the code in an isolated, ephemeral Docker container.
@@ -31,7 +32,8 @@ class CodeSandbox:
             device_requests = [docker.types.DeviceRequest(count=-1, capabilities=[['gpu']])]
         elif language == "python":
             image = "python:3.11-slim"
-            compile_cmd = "python source.py"
+            # TODO: This should be user specific.. or determined from the code itself.
+            compile_cmd = "pip install --quiet numpy pandas scipy && python source.py"
             filename = "source.py"
             device_requests = []
         else:
@@ -68,7 +70,7 @@ class CodeSandbox:
                     remove=True, # Auto-destroy container when done
                     detach=False,
                     mem_limit="512m", 
-                    network_disabled=True, 
+                    network_disabled=False, 
                     device_requests=device_requests,
                     environment={"OMP_NUM_THREADS": "1"},
                     pids_limit=50,   # Security: Prevent fork bombs

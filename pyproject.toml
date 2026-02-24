@@ -18,7 +18,9 @@ dependencies = [
     "langchain-google-genai",
     "langchain-openai",
     "langchain-anthropic",
-    "pydantic"
+    "pydantic",
+    "chromadb",
+    "sentence-transformers"
 ]
 
 [project.scripts]

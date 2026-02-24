@@ -25,7 +25,7 @@ def run_configure():
     
     provider = Prompt.ask(
         "Which AI provider do you want to use?", 
-        choices=["ollama", "openai", "anthropic", "google"], 
+        choices=["ollama", "local_server", "openai", "anthropic", "google"], 
         default=config.get("provider", "ollama")
     )
     
@@ -33,6 +33,9 @@ def run_configure():
     
     if provider == "ollama":
         config["model_name"] = Prompt.ask("Ollama model name", default=config.get("model_name", "llama3.2"))
+    elif provider == "local_server":
+        config["model_name"] = Prompt.ask("Local model name (optional)", default=config.get("model_name", "local-model"))
+        config["api_keys"]["local_url"] = Prompt.ask("Local Server Base URL", default="http://localhost:1234/v1")
     elif provider == "openai":
         config["model_name"] = Prompt.ask("OpenAI model name", default="gpt-4o")
         config["api_keys"]["openai"] = Prompt.ask("OpenAI API Key (hidden)", password=True)

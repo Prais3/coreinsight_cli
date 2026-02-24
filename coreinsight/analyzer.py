@@ -45,6 +45,17 @@ class AnalyzerAgent:
             )
             self.json_llm = self.base_llm
 
+        elif provider == "local_server":
+            base_url = api_keys.get("local_url", "http://localhost:1234/v1")
+            self.base_llm = ChatOpenAI(
+                model=model_name,
+                api_key="not-needed", # Local servers usually ignore this
+                base_url=base_url,
+                temperature=0.1,
+                model_kwargs={"response_format": {"type": "json_object"}}
+            )
+            self.json_llm = self.base_llm
+
         elif provider == "anthropic":
             if not api_keys.get("anthropic"):
                 raise ValueError("Anthropic API Key required.")
@@ -78,7 +89,7 @@ class AnalyzerAgent:
         # 2. Bind the JSON format specifically for the analysis chain
         self.prompt = PromptTemplate(
             template=ANALYSIS_TEMPLATE + "\n\n{format_instructions}",
-            input_variables=["language", "code_content", "hardware_target"],
+            input_variables=["language", "code_content", "context", "hardware_target"],
             partial_variables={
                 "system_prompt": SYSTEM_PROMPT,
                 "format_instructions": self.parser.get_format_instructions()
@@ -86,11 +97,12 @@ class AnalyzerAgent:
         )
         self.chain = self.prompt | self.json_llm | self.parser
 
-    def analyze(self, code: str, language: str, hardware_target: str = "Generic CPU"):
+    def analyze(self, code: str, language: str, context: str = "", hardware_target: str = "Generic CPU"):
         try:
             return self.chain.invoke({
                 "language": language,
                 "code_content": code,
+                "context": context,
                 "hardware_target": hardware_target
             })
         except OutputParserException:
@@ -112,39 +124,42 @@ class AnalyzerAgent:
                 "optimized_code": None
             }
     
-    def generate_harness(self, original_code: str, optimized_code: str, language: str) -> str:
+    def generate_harness(self, func_name: str, original_code: str, optimized_code: str, language: str) -> str:
         harness_prompt = """
-        You are a strict QA engineer. I have an original function and an optimized function.
-        Write a standalone benchmark script that:
-        1. Includes necessary headers/imports (e.g., <iostream>, <chrono>, <vector>).
-        2. Initializes realistic dummy data for the functions.
-        3. Executes the original function and times it.
-        4. Executes the optimized function and times it.
-        5. Verifies the outputs match.
-        6. Prints the execution times and the speedup multiplier to stdout.
+        You are a strict QA engineer writing a standalone benchmark script in {language}.
 
-        Language: {language}
-        
-        Original Code Signature/Logic:
+        ORIGINAL FUNCTION (Name: {func_name}):
         {original}
         
-        Optimized Code Signature/Logic:
+        OPTIMIZED FUNCTION:
         {optimized}
         
-        CRITICAL: Output ONLY the raw executable code (like the `int main()` block). Do not use markdown wrappers. Just the code.
+        Write the complete executable script (e.g., `int main()` or `if __name__ == "__main__":`) that:
+        1. Includes necessary imports/headers.
+        2. Defines BOTH functions exactly as provided above. 
+        3. Initializes realistic dummy data for the arguments.
+        4. Times the original function execution.
+        5. Times the optimized function execution.
+        6. Prints the execution times and calculates the speedup.
+
+        CRITICAL CONSTRAINTS:
+        - DO NOT rename the original function. You MUST call it exactly `{func_name}`.
+        - Calculate the speedup dynamically: `speedup = original_time / max(optimized_time, 1e-9)`. 
+        - DO NOT hardcode the speedup value. Let the code calculate it.
+        - Output ONLY the raw executable code. No markdown formatting, no backticks, no explanations.
         """
         
         try:
             chain = PromptTemplate.from_template(harness_prompt) | self.base_llm
             result = chain.invoke({
                 "language": language,
+                "func_name": func_name,
                 "original": original_code,
                 "optimized": optimized_code
             })
             
             code = result.content if hasattr(result, 'content') else str(result)
             
-            # Robust Extraction
             match = re.search(r'```(?:cpp|python|c\+\+|cu|cuh|c)?\n(.*?)```', code, re.DOTALL | re.IGNORECASE)
             if match:
                 code = match.group(1).strip()
@@ -154,3 +169,44 @@ class AnalyzerAgent:
             return code
         except Exception as e:
             return f"// Failed to generate harness: {e}\nint main() {{ return 1; }}"
+        
+    def fix_harness(self, func_name: str, original_code: str, bad_harness: str, error_logs: str, language: str) -> str:
+        fix_prompt = """
+        You are an expert {language} developer. You previously wrote a benchmark script that FAILED in the execution sandbox.
+        
+        ORIGINAL FUNCTION TO BENCHMARK (Name: {func_name}):
+        {original}
+        
+        YOUR FAILED SCRIPT:
+        {bad_harness}
+        
+        EXECUTION ERROR / TIMEOUT LOGS:
+        {error_logs}
+        
+        INSTRUCTIONS:
+        1. Identify why the code failed (e.g., infinite loop, missing import, syntax error, NameError).
+        2. Fix the error. If it was a timeout, check your loop bounds and while-conditions.
+        3. Output ONLY the raw executable {language} code. No markdown wrappers, no explanations.
+        """
+        
+        try:
+            chain = PromptTemplate.from_template(fix_prompt) | self.base_llm
+            result = chain.invoke({
+                "language": language,
+                "func_name": func_name,
+                "original": original_code,
+                "bad_harness": bad_harness,
+                "error_logs": error_logs
+            })
+            
+            code = result.content if hasattr(result, 'content') else str(result)
+            
+            match = re.search(r'```(?:cpp|python|c\+\+|cu|cuh|c)?\n(.*?)```', code, re.DOTALL | re.IGNORECASE)
+            if match:
+                code = match.group(1).strip()
+            else:
+                code = code.replace("```cpp", "").replace("```python", "").replace("```", "").strip()
+                
+            return code
+        except Exception as e:
+            return bad_harness # Fallback to the original bad harness if the LLM fails

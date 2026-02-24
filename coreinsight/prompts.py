@@ -13,6 +13,11 @@ Perform a strict, deep performance audit on the following {language} code.
 
 TARGET HARDWARE: {hardware_target}
 
+GLOBAL REPOSITORY CONTEXT (Reference this for custom types, structs, or imported functions):
+'''
+{context}
+'''
+
 CODE TO ANALYZE:
 '''
 {code_content}
