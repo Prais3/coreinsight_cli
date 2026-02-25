@@ -125,6 +125,10 @@ class AnalyzerAgent:
             }
     
     def generate_harness(self, func_name: str, original_code: str, optimized_code: str, language: str, context: str = "", hardware_target: str = "Generic CPU") -> str:
+        # TODO:
+        # Some comments - the prompt below works wonderfully
+        # However - I am looking for a generalized solution
+        # One that can support multiple types of input data and can handle it well
         harness_prompt = """
         You are a strict QA engineer writing a standalone asymptotic scaling benchmark script in {language}.
 
@@ -137,6 +141,56 @@ class AnalyzerAgent:
         GLOBAL DEPENDENCIES (Helper functions/structs required to run the code):
         {context}
         
+        [FOR PYTHON] You MUST use this exact boilerplate structure for your main block:
+        ```python
+        import time
+        import matplotlib.pyplot as plt
+        # ... your definitions here ...
+
+        if __name__ == "__main__":
+            # CRITICAL HARDWARE AWARENESS: 
+            # You are targeting: {hardware_target}.
+            # 1. Analyze the time and space complexity of the algorithm (e.g., O(N^2), O(N^3)).
+            # 2. Calculate the approximate byte size of the data structures in memory at size N.
+            # 3. Define the `sizes` array. The largest N MUST cross the CPU cache boundaries to test true memory latency, 
+            #    BUT it MUST NOT exceed 20% of the available RAM/VRAM to prevent OOM crashes.
+            sizes = [ /* Your dynamically calculated sizes */ ]
+            print("N,Original_Time,Optimized_Time,Speedup")
+            orig_times, opt_times = [], []
+            
+            for N in sizes:
+                # 1. Initialize dummy data for size N
+                # 2. Run original:
+                t0 = time.perf_counter()
+                res1 = {func_name}(...) # Call original
+                t1 = time.perf_counter()
+                
+                # 3. Run optimized:
+                t2 = time.perf_counter()
+                res2 = optimized_function(...) # Call optimized
+                t3 = time.perf_counter()
+                
+                orig_time = max(t1 - t0, 1e-9)
+                opt_time = max(t3 - t2, 1e-9)
+                speedup = orig_time / opt_time
+                
+                orig_times.append(orig_time)
+                opt_times.append(opt_time)
+                print(f"{{N}},{{orig_time:.6f}},{{opt_time:.6f}},{{speedup:.2f}}")
+                
+            # Plotting logic here, save to 'benchmark_plot.png'
+        ```
+
+        [FOR C++] Adapt the above structure using `std::chrono::high_resolution_clock`.
+        
+        CRITICAL RULES:
+        1. Include the GLOBAL DEPENDENCIES.
+        2. DO NOT rename the original function.
+        3. STRICT ISOLATION RULE: DO NOT use local imports (e.g., `import data_processor` or `from bad_loop import...`). This script runs in a totally empty, isolated sandbox. You MUST write/copy all function definitions directly inside this script.
+        4. Output ONLY the raw executable code. No markdown backticks.
+        """
+        
+        """
         Write the complete executable script (e.g., `int main()` or `if __name__ == "__main__":`) that:
         1. Includes necessary imports/headers.
         2. INCLUDES all required helper functions or structs from the GLOBAL DEPENDENCIES above so the script can run standalone.

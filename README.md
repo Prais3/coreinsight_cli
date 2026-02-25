@@ -40,5 +40,35 @@ Instead of guessing which files are slow, scan your entire repository. CoreInsig
 coreinsight scan
 ```
 
+## Build the Project
+
+Download build:
+```bash
+pip install build
+```
+
+Run the build command to generate wheel file:
+```bash
+python -m build --wheel
+```
+
+To build project elsewhere using wheel file:
+```bash
+pip install dist/coreinsight_cli-*.whl
+```
+
+To build project using source code:
+```bash
+pip install -e .
+```
+
 ### Architecture Notes
 CoreInsight runs 100% locally. Code is only transmitted to the AI provider you configure. If you use Ollama or a local server, your proprietary code never leaves your machine.
+
+## Current/Future Features In Progess:
+
+- Improve AST parsing
+- Extract and integrate hardware information for the LLM
+- Improve CLI interface
+- Parallel execution
+- Improve RAG

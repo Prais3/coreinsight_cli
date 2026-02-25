@@ -1,6 +1,7 @@
 # Custom
 test/.coreinsight*
 test/*.md
+test/*.png
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
