@@ -124,9 +124,9 @@ class AnalyzerAgent:
                 "optimized_code": None
             }
     
-    def generate_harness(self, func_name: str, original_code: str, optimized_code: str, language: str) -> str:
+    def generate_harness(self, func_name: str, original_code: str, optimized_code: str, language: str, context: str = "", hardware_target: str = "Generic CPU") -> str:
         harness_prompt = """
-        You are a strict QA engineer writing a standalone benchmark script in {language}.
+        You are a strict QA engineer writing a standalone asymptotic scaling benchmark script in {language}.
 
         ORIGINAL FUNCTION (Name: {func_name}):
         {original}
@@ -134,19 +134,40 @@ class AnalyzerAgent:
         OPTIMIZED FUNCTION:
         {optimized}
         
+        GLOBAL DEPENDENCIES (Helper functions/structs required to run the code):
+        {context}
+        
         Write the complete executable script (e.g., `int main()` or `if __name__ == "__main__":`) that:
         1. Includes necessary imports/headers.
-        2. Defines BOTH functions exactly as provided above. 
-        3. Initializes realistic dummy data for the arguments.
-        4. Times the original function execution.
-        5. Times the optimized function execution.
-        6. Prints the execution times and calculates the speedup.
+        2. INCLUDES all required helper functions or structs from the GLOBAL DEPENDENCIES above so the script can run standalone.
+        3. Defines BOTH the original and optimized functions exactly as provided above. 
+        4. Creates a loop to test multiple data sizes (e.g., N=10, 100, 1000, 5000).
+        5. Target Hardware: {hardware_target}. Ensure your max N crosses cache boundaries but DOES NOT exceed available RAM to prevent OOM crashes.
+        6. Initializes realistic dummy data for the arguments at each size N.
+        7. Time the execution of the original vs optimized functions.
+        
+        CRITICAL TIMING MATH:
+        - Use HIGH-RESOLUTION timers (e.g., `time.perf_counter()` in Python, `std::chrono::high_resolution_clock` in C++).
+        - Calculate duration strictly as `end_time - start_time`.
+        - Prevent zero-division by clamping both times: `orig_time = max(end_time - start_time, 1e-9)` and `opt_time = max(end_time - start_time, 1e-9)`.
+        - Calculate the speedup dynamically: `speedup = orig_time / opt_time`.
 
+        ENVIRONMENT CONSTRAINTS (CRITICAL):
+        This script will run in a totally empty, isolated Docker container. There are NO other files in the directory.
+        Therefore, you CANNOT use local imports (e.g., `from data_processor import...`). 
+        You MUST define `{func_name}`, the optimized function, and any GLOBAL DEPENDENCIES inline directly inside this script.
+        
         CRITICAL CONSTRAINTS:
         - DO NOT rename the original function. You MUST call it exactly `{func_name}`.
-        - Calculate the speedup dynamically: `speedup = original_time / max(optimized_time, 1e-9)`. 
-        - DO NOT hardcode the speedup value. Let the code calculate it.
-        - Output ONLY the raw executable code. No markdown formatting, no backticks, no explanations.
+        - [FOR PYTHON ONLY]: Import `matplotlib.pyplot as plt`, plot Original vs Optimized times against N, and save the plot as `benchmark_plot.png` in the current working directory.
+        
+        STDOUT FORMATTING (CRITICAL):
+        You MUST print the final results to stdout in EXACTLY this CSV format, with this exact header, and absolutely no other text:
+        N,Original_Time,Optimized_Time,Speedup
+        10,0.002,0.001,2.00
+        100,0.020,0.005,4.00
+        
+        Output ONLY the raw executable code. No markdown formatting, no backticks, no explanations.
         """
         
         try:
@@ -155,7 +176,8 @@ class AnalyzerAgent:
                 "language": language,
                 "func_name": func_name,
                 "original": original_code,
-                "optimized": optimized_code
+                "optimized": optimized_code,
+                "context": context
             })
             
             code = result.content if hasattr(result, 'content') else str(result)
@@ -170,23 +192,35 @@ class AnalyzerAgent:
         except Exception as e:
             return f"// Failed to generate harness: {e}\nint main() {{ return 1; }}"
         
-    def fix_harness(self, func_name: str, original_code: str, bad_harness: str, error_logs: str, language: str) -> str:
+    def fix_harness(self, func_name: str, original_code: str, bad_harness: str, error_logs: str, language: str, context: str = "") -> str:
         fix_prompt = """
-        You are an expert {language} developer. You previously wrote a benchmark script that FAILED in the execution sandbox.
+        You are an expert {language} developer. You previously wrote an ASYMPTOTIC benchmark script that FAILED in the execution sandbox.
         
         ORIGINAL FUNCTION TO BENCHMARK (Name: {func_name}):
         {original}
+        
+        GLOBAL DEPENDENCIES (Helper functions/structs required to run the code):
+        {context}
         
         YOUR FAILED SCRIPT:
         {bad_harness}
         
         EXECUTION ERROR / TIMEOUT LOGS:
         {error_logs}
-        
+
+        ENVIRONMENT CONSTRAINTS (CRITICAL):
+        This script will run in a totally empty, isolated Docker container. There are NO other files in the directory.
+        Therefore, you CANNOT use local imports (e.g., `from data_processor import...`). 
+        You MUST define `{func_name}`, the optimized function, and any GLOBAL DEPENDENCIES inline directly inside this script.
+
         INSTRUCTIONS:
-        1. Identify why the code failed (e.g., infinite loop, missing import, syntax error, NameError).
-        2. Fix the error. If it was a timeout, check your loop bounds and while-conditions.
-        3. Output ONLY the raw executable {language} code. No markdown wrappers, no explanations.
+        1. Identify why the code failed (e.g., infinite loop, missing import, NameError).
+        2. Fix the error (e.g., missing dependencies, NameError, ModuleNotFoundError). Check GLOBAL DEPENDENCIES if needed: {context}
+        3. STRICT ISOLATION RULE: DO NOT import local files! If you get a `ModuleNotFoundError` for a local file, it's because you tried to import it instead of defining the function directly in the script.
+        4. CRITICAL TIMING: Use `time.perf_counter()` (Python) or `std::chrono` (C++). Clamp times using `max(end - start, 1e-9)` to prevent negative zeros and division by zero.
+        5. YOU MUST MAINTAIN the strict CSV printing loop: "N,Original_Time,Optimized_Time,Speedup".
+        6. REMEMBER: Test multiple dataset sizes (N). If Python, save `benchmark_plot.png`. Print ONLY the exact CSV format to stdout.
+        7. Output ONLY the raw executable {language} code. No markdown wrappers, no explanations.
         """
         
         try:
@@ -195,6 +229,7 @@ class AnalyzerAgent:
                 "language": language,
                 "func_name": func_name,
                 "original": original_code,
+                "context": context,
                 "bad_harness": bad_harness,
                 "error_logs": error_logs
             })

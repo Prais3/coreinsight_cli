@@ -20,7 +20,8 @@ dependencies = [
     "langchain-anthropic",
     "pydantic",
     "chromadb",
-    "sentence-transformers"
+    "sentence-transformers",
+    "psutil"
 ]
 
 [project.scripts]

@@ -28,10 +28,16 @@ Index your repository so the AI understands your custom structs, classes, and de
 coreinsight index
 ```
 
-**4. Configure CoreInsight CLI:**
+**4. Test on a file:**
 Analyze a specific file. The CLI will extract hot loops, process them in parallel, verify optimizations in Docker, and output a live Markdown report.
 ```bash
 coreinsight analyze <file_name>
+```
+
+**5. Project-Wide Hotspot Scanning:**
+Instead of guessing which files are slow, scan your entire repository. CoreInsight will use static AST analysis to rank the most complex, deeply-nested loops in your project.
+```bash
+coreinsight scan
 ```
 
 ### Architecture Notes
