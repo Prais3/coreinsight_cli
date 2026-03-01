@@ -1,7 +1,7 @@
 # Custom
-test/.coreinsight*
-test/*.md
-test/*.png
+.coreinsight*
+*.md
+*.png
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

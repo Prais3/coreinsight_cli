@@ -1,5 +1,3 @@
-# bad_loop.py
-
 def count_unique_numbers(numbers):
     """
     Inefficiently counts unique numbers in a list.

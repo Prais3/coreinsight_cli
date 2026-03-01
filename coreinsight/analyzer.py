@@ -6,7 +6,6 @@ from langchain_core.output_parsers import JsonOutputParser
 from langchain_core.prompts import PromptTemplate
 from langchain_core.exceptions import OutputParserException
 
-# Provider Imports
 from langchain_ollama import ChatOllama
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
@@ -14,11 +13,13 @@ from langchain_anthropic import ChatAnthropic
 
 from coreinsight.prompts import SYSTEM_PROMPT, ANALYSIS_TEMPLATE
 
+
 class Bottleneck(BaseModel):
     line: int = Field(description="The approximate line number of the issue in the original code")
     severity: str = Field(description="Critical, High, Medium, Low")
     message: str = Field(description="Specific hardware or algorithmic bottleneck at this line")
     suggestion: str = Field(description="How to fix this specific line")
+
 
 class AuditResult(BaseModel):
     severity: str = Field(description="Overall severity: Critical, High, Medium, Low")
@@ -27,13 +28,85 @@ class AuditResult(BaseModel):
     suggestion: str = Field(description="Overall specific fix strategy")
     bottlenecks: List[Bottleneck] = Field(description="List of specific line-level bottlenecks", default_factory=list)
     optimized_code: Optional[str] = Field(description="The entirely rewritten optimized code, ready to drop in", default=None)
-    
+
+
+_HARNESS_TEMPLATE = """
+You are a strict QA engineer writing a standalone asymptotic scaling benchmark script in {language}.
+
+ORIGINAL FUNCTION (Name: {func_name}):
+{original}
+
+OPTIMIZED FUNCTION:
+{optimized}
+
+GLOBAL DEPENDENCIES (Helper functions/structs required to run the code):
+{context}
+
+Write the complete executable script (e.g., `int main()` or `if __name__ == "__main__":`) that:
+1. Includes necessary imports/headers.
+2. Includes ALL required helper functions or structs from GLOBAL DEPENDENCIES so the script is fully standalone.
+3. Defines BOTH the original and optimized functions exactly as provided above.
+4. Tests multiple data sizes (e.g., N=10, 100, 1000, 5000).
+5. Target Hardware: {hardware_target}. The largest N MUST cross cache boundaries but MUST NOT exceed 20% of available RAM to prevent OOM crashes.
+6. Initializes realistic dummy data for each size N.
+7. Times execution of original vs optimized using high-resolution timers.
+
+CRITICAL TIMING:
+- Python: use `time.perf_counter()`. C++: use `std::chrono::high_resolution_clock`.
+- Clamp: `orig_time = max(end - start, 1e-9)` to prevent zero-division.
+- Speedup: `speedup = orig_time / opt_time`.
+
+ISOLATION RULES (CRITICAL):
+- This runs in an empty Docker container. NO local files exist.
+- DO NOT use local imports. Define everything inline.
+- DO NOT rename the original function — call it exactly `{func_name}`.
+
+OUTPUT FORMAT (CRITICAL):
+Print ONLY this exact CSV to stdout, no other text:
+N,Original_Time,Optimized_Time,Speedup
+10,0.002,0.001,2.00
+
+[PYTHON ONLY]: Also import matplotlib, plot results, and save as `benchmark_plot.png`.
+
+FORMATTING RULE: Wrap your ENTIRE script in a single markdown code block. No text before or after.
+"""
+
+_FIX_TEMPLATE = """
+You are an expert {language} developer. Your previous benchmark script FAILED in an isolated sandbox.
+
+ORIGINAL FUNCTION (Name: {func_name}):
+{original}
+
+GLOBAL DEPENDENCIES:
+{context}
+
+YOUR FAILED SCRIPT:
+{bad_harness}
+
+EXECUTION ERROR LOGS:
+{error_logs}
+
+ISOLATION CONSTRAINTS (CRITICAL):
+- Empty Docker container. No local files. NO local imports.
+- Define `{func_name}` and all GLOBAL DEPENDENCIES inline.
+
+FIX INSTRUCTIONS:
+1. Diagnose the failure from the error logs above.
+2. Fix imports, NameErrors, type mismatches, infinite loops, or OOM issues.
+3. Maintain the CSV stdout format exactly: N,Original_Time,Optimized_Time,Speedup
+4. Use high-resolution timers and clamp with `max(t, 1e-9)`.
+5. [PYTHON ONLY]: Save benchmark plot as `benchmark_plot.png`.
+
+FORMATTING RULE: Wrap your ENTIRE fixed script in a single markdown code block. No text before or after.
+"""
+
+
 class AnalyzerAgent:
     def __init__(self, provider="ollama", model_name="llama3.2", api_keys=None):
         self.parser = JsonOutputParser(pydantic_object=AuditResult)
+        self.provider = provider
         api_keys = api_keys or {}
-        
-        # 1. Initialize the Base LLM
+
         if provider == "openai":
             if not api_keys.get("openai"):
                 raise ValueError("OpenAI API Key required.")
@@ -41,7 +114,7 @@ class AnalyzerAgent:
                 model=model_name,
                 api_key=api_keys["openai"],
                 temperature=0.1,
-                model_kwargs={"response_format": {"type": "json_object"}}
+                model_kwargs={"response_format": {"type": "json_object"}},
             )
             self.json_llm = self.base_llm
 
@@ -49,10 +122,10 @@ class AnalyzerAgent:
             base_url = api_keys.get("local_url", "http://localhost:1234/v1")
             self.base_llm = ChatOpenAI(
                 model=model_name,
-                api_key="not-needed", # Local servers usually ignore this
+                api_key="not-needed",
                 base_url=base_url,
                 temperature=0.1,
-                model_kwargs={"response_format": {"type": "json_object"}}
+                model_kwargs={"response_format": {"type": "json_object"}},
             )
             self.json_llm = self.base_llm
 
@@ -62,38 +135,38 @@ class AnalyzerAgent:
             self.base_llm = ChatAnthropic(
                 model=model_name,
                 api_key=api_keys["anthropic"],
-                temperature=0.1
+                temperature=0.1,
             )
+            # Anthropic doesn't support response_format; JSON is enforced via prompt only
             self.json_llm = self.base_llm
 
         elif provider == "google":
             if not api_keys.get("google"):
                 raise ValueError("Google Gemini API Key required.")
             self.base_llm = ChatGoogleGenerativeAI(
-                model=model_name, 
+                model=model_name,
                 google_api_key=api_keys["google"],
                 temperature=0.1,
-                convert_system_message_to_human=True
+                convert_system_message_to_human=True,
             )
-            self.json_llm = self.base_llm 
+            self.json_llm = self.base_llm
 
-        else: # Default to Ollama
+        else:  # Ollama default
             self.base_llm = ChatOllama(
                 model=model_name,
                 temperature=0.1,
                 num_predict=4096,
-                num_ctx=8192
+                num_ctx=8192,
             )
             self.json_llm = self.base_llm.bind(format="json")
-        
-        # 2. Bind the JSON format specifically for the analysis chain
+
         self.prompt = PromptTemplate(
             template=ANALYSIS_TEMPLATE + "\n\n{format_instructions}",
             input_variables=["language", "code_content", "context", "hardware_target"],
             partial_variables={
                 "system_prompt": SYSTEM_PROMPT,
-                "format_instructions": self.parser.get_format_instructions()
-            }
+                "format_instructions": self.parser.get_format_instructions(),
+            },
         )
         self.chain = self.prompt | self.json_llm | self.parser
 
@@ -103,7 +176,7 @@ class AnalyzerAgent:
                 "language": language,
                 "code_content": code,
                 "context": context,
-                "hardware_target": hardware_target
+                "hardware_target": hardware_target,
             })
         except OutputParserException:
             return {
@@ -112,7 +185,7 @@ class AnalyzerAgent:
                 "reasoning": "The model failed to return valid JSON.",
                 "suggestion": "Try running the analysis again or use a larger parameter model.",
                 "bottlenecks": [],
-                "optimized_code": None
+                "optimized_code": None,
             }
         except Exception as e:
             return {
@@ -121,181 +194,88 @@ class AnalyzerAgent:
                 "reasoning": "System error during analysis pipeline.",
                 "suggestion": "Check LLM API keys and connectivity.",
                 "bottlenecks": [],
-                "optimized_code": None
+                "optimized_code": None,
             }
-    
-    def generate_harness(self, func_name: str, original_code: str, optimized_code: str, language: str, context: str = "", hardware_target: str = "Generic CPU") -> str:
-        # TODO:
-        # Some comments - the prompt below works wonderfully
-        # However - I am looking for a generalized solution
-        # One that can support multiple types of input data and can handle it well
-        harness_prompt = """
-        You are a strict QA engineer writing a standalone asymptotic scaling benchmark script in {language}.
 
-        ORIGINAL FUNCTION (Name: {func_name}):
-        {original}
-        
-        OPTIMIZED FUNCTION:
-        {optimized}
-        
-        GLOBAL DEPENDENCIES (Helper functions/structs required to run the code):
-        {context}
-        
-        [FOR PYTHON] You MUST use this exact boilerplate structure for your main block:
-        ```python
-        import time
-        import matplotlib.pyplot as plt
-        # ... your definitions here ...
+    def _extract_executable_code(self, response_text: str) -> str:
+        """Extract the first/longest fenced code block from model output."""
+        blocks = re.findall(r"```[a-zA-Z+#]*\s*\n(.*?)```", response_text, re.DOTALL)
+        if blocks:
+            return max(blocks, key=len).strip()
 
-        if __name__ == "__main__":
-            # CRITICAL HARDWARE AWARENESS: 
-            # You are targeting: {hardware_target}.
-            # 1. Analyze the time and space complexity of the algorithm (e.g., O(N^2), O(N^3)).
-            # 2. Calculate the approximate byte size of the data structures in memory at size N.
-            # 3. Define the `sizes` array. The largest N MUST cross the CPU cache boundaries to test true memory latency, 
-            #    BUT it MUST NOT exceed 20% of the available RAM/VRAM to prevent OOM crashes.
-            sizes = [ /* Your dynamically calculated sizes */ ]
-            print("N,Original_Time,Optimized_Time,Speedup")
-            orig_times, opt_times = [], []
-            
-            for N in sizes:
-                # 1. Initialize dummy data for size N
-                # 2. Run original:
-                t0 = time.perf_counter()
-                res1 = {func_name}(...) # Call original
-                t1 = time.perf_counter()
-                
-                # 3. Run optimized:
-                t2 = time.perf_counter()
-                res2 = optimized_function(...) # Call optimized
-                t3 = time.perf_counter()
-                
-                orig_time = max(t1 - t0, 1e-9)
-                opt_time = max(t3 - t2, 1e-9)
-                speedup = orig_time / opt_time
-                
-                orig_times.append(orig_time)
-                opt_times.append(opt_time)
-                print(f"{{N}},{{orig_time:.6f}},{{opt_time:.6f}},{{speedup:.2f}}")
-                
-            # Plotting logic here, save to 'benchmark_plot.png'
-        ```
+        # Fallback: strip fence markers line by line to avoid corrupting code
+        lines = response_text.strip().split("\n")
+        lines = [l for l in lines if not re.match(r"^```", l)]
+        while lines and lines[0].lower().startswith(("here is", "sure", "certainly", "output:")) \
+                and not lines[0].strip().startswith(("#", "//")):
+            lines.pop(0)
+        return "\n".join(lines).strip()
 
-        [FOR C++] Adapt the above structure using `std::chrono::high_resolution_clock`.
-        
-        CRITICAL RULES:
-        1. Include the GLOBAL DEPENDENCIES.
-        2. DO NOT rename the original function.
-        3. STRICT ISOLATION RULE: DO NOT use local imports (e.g., `import data_processor` or `from bad_loop import...`). This script runs in a totally empty, isolated sandbox. You MUST write/copy all function definitions directly inside this script.
-        4. Output ONLY the raw executable code. No markdown backticks.
-        """
-        
-        """
-        Write the complete executable script (e.g., `int main()` or `if __name__ == "__main__":`) that:
-        1. Includes necessary imports/headers.
-        2. INCLUDES all required helper functions or structs from the GLOBAL DEPENDENCIES above so the script can run standalone.
-        3. Defines BOTH the original and optimized functions exactly as provided above. 
-        4. Creates a loop to test multiple data sizes (e.g., N=10, 100, 1000, 5000).
-        5. Target Hardware: {hardware_target}. Ensure your max N crosses cache boundaries but DOES NOT exceed available RAM to prevent OOM crashes.
-        6. Initializes realistic dummy data for the arguments at each size N.
-        7. Time the execution of the original vs optimized functions.
-        
-        CRITICAL TIMING MATH:
-        - Use HIGH-RESOLUTION timers (e.g., `time.perf_counter()` in Python, `std::chrono::high_resolution_clock` in C++).
-        - Calculate duration strictly as `end_time - start_time`.
-        - Prevent zero-division by clamping both times: `orig_time = max(end_time - start_time, 1e-9)` and `opt_time = max(end_time - start_time, 1e-9)`.
-        - Calculate the speedup dynamically: `speedup = orig_time / opt_time`.
+    def _invoke_code_chain(self, template: str, variables: dict, language: str) -> str:
+        """Shared invocation + extraction logic for harness and fix chains."""
+        chain = PromptTemplate.from_template(template) | self.base_llm
+        result = chain.invoke(variables)
+        raw = result.content if hasattr(result, "content") else str(result)
+        # Handle Anthropic returning a list of content blocks
+        if isinstance(raw, list):
+            raw = "\n".join(
+                item["text"] if isinstance(item, dict) and "text" in item else str(item)
+                for item in raw
+            )
+        return self._extract_executable_code(raw)
 
-        ENVIRONMENT CONSTRAINTS (CRITICAL):
-        This script will run in a totally empty, isolated Docker container. There are NO other files in the directory.
-        Therefore, you CANNOT use local imports (e.g., `from data_processor import...`). 
-        You MUST define `{func_name}`, the optimized function, and any GLOBAL DEPENDENCIES inline directly inside this script.
-        
-        CRITICAL CONSTRAINTS:
-        - DO NOT rename the original function. You MUST call it exactly `{func_name}`.
-        - [FOR PYTHON ONLY]: Import `matplotlib.pyplot as plt`, plot Original vs Optimized times against N, and save the plot as `benchmark_plot.png` in the current working directory.
-        
-        STDOUT FORMATTING (CRITICAL):
-        You MUST print the final results to stdout in EXACTLY this CSV format, with this exact header, and absolutely no other text:
-        N,Original_Time,Optimized_Time,Speedup
-        10,0.002,0.001,2.00
-        100,0.020,0.005,4.00
-        
-        Output ONLY the raw executable code. No markdown formatting, no backticks, no explanations.
-        """
-        
+    def generate_harness(
+        self,
+        func_name: str,
+        original_code: str,
+        optimized_code: str,
+        language: str,
+        context: str = "",
+        hardware_target: str = "Generic CPU",
+    ) -> str:
         try:
-            chain = PromptTemplate.from_template(harness_prompt) | self.base_llm
-            result = chain.invoke({
-                "language": language,
-                "func_name": func_name,
-                "original": original_code,
-                "optimized": optimized_code,
-                "context": context
-            })
-            
-            code = result.content if hasattr(result, 'content') else str(result)
-            
-            match = re.search(r'```(?:cpp|python|c\+\+|cu|cuh|c)?\n(.*?)```', code, re.DOTALL | re.IGNORECASE)
-            if match:
-                code = match.group(1).strip()
-            else:
-                code = code.replace("```cpp", "").replace("```python", "").replace("```", "").strip()
-                
-            return code
+            return self._invoke_code_chain(
+                _HARNESS_TEMPLATE,
+                {
+                    "language": language,
+                    "func_name": func_name,
+                    "original": original_code,
+                    "optimized": optimized_code,
+                    "context": context,
+                    "hardware_target": hardware_target,
+                },
+                language,
+            )
         except Exception as e:
-            return f"// Failed to generate harness: {e}\nint main() {{ return 1; }}"
-        
-    def fix_harness(self, func_name: str, original_code: str, bad_harness: str, error_logs: str, language: str, context: str = "") -> str:
-        fix_prompt = """
-        You are an expert {language} developer. You previously wrote an ASYMPTOTIC benchmark script that FAILED in the execution sandbox.
-        
-        ORIGINAL FUNCTION TO BENCHMARK (Name: {func_name}):
-        {original}
-        
-        GLOBAL DEPENDENCIES (Helper functions/structs required to run the code):
-        {context}
-        
-        YOUR FAILED SCRIPT:
-        {bad_harness}
-        
-        EXECUTION ERROR / TIMEOUT LOGS:
-        {error_logs}
+            is_python = language.lower() == "python"
+            opener = "#" if is_python else "//"
+            entry = 'if __name__ == "__main__":' if is_python else "int main() {"
+            stub = "    pass" if is_python else "    return 1;\n}"
+            return f"{opener} Failed to generate harness: {e}\n{entry}\n{stub}"
 
-        ENVIRONMENT CONSTRAINTS (CRITICAL):
-        This script will run in a totally empty, isolated Docker container. There are NO other files in the directory.
-        Therefore, you CANNOT use local imports (e.g., `from data_processor import...`). 
-        You MUST define `{func_name}`, the optimized function, and any GLOBAL DEPENDENCIES inline directly inside this script.
-
-        INSTRUCTIONS:
-        1. Identify why the code failed (e.g., infinite loop, missing import, NameError).
-        2. Fix the error (e.g., missing dependencies, NameError, ModuleNotFoundError). Check GLOBAL DEPENDENCIES if needed: {context}
-        3. STRICT ISOLATION RULE: DO NOT import local files! If you get a `ModuleNotFoundError` for a local file, it's because you tried to import it instead of defining the function directly in the script.
-        4. CRITICAL TIMING: Use `time.perf_counter()` (Python) or `std::chrono` (C++). Clamp times using `max(end - start, 1e-9)` to prevent negative zeros and division by zero.
-        5. YOU MUST MAINTAIN the strict CSV printing loop: "N,Original_Time,Optimized_Time,Speedup".
-        6. REMEMBER: Test multiple dataset sizes (N). If Python, save `benchmark_plot.png`. Print ONLY the exact CSV format to stdout.
-        7. Output ONLY the raw executable {language} code. No markdown wrappers, no explanations.
-        """
-        
+    def fix_harness(
+        self,
+        func_name: str,
+        original_code: str,
+        bad_harness: str,
+        error_logs: str,
+        language: str,
+        context: str = "",
+    ) -> str:
         try:
-            chain = PromptTemplate.from_template(fix_prompt) | self.base_llm
-            result = chain.invoke({
-                "language": language,
-                "func_name": func_name,
-                "original": original_code,
-                "context": context,
-                "bad_harness": bad_harness,
-                "error_logs": error_logs
-            })
-            
-            code = result.content if hasattr(result, 'content') else str(result)
-            
-            match = re.search(r'```(?:cpp|python|c\+\+|cu|cuh|c)?\n(.*?)```', code, re.DOTALL | re.IGNORECASE)
-            if match:
-                code = match.group(1).strip()
-            else:
-                code = code.replace("```cpp", "").replace("```python", "").replace("```", "").strip()
-                
-            return code
+            return self._invoke_code_chain(
+                _FIX_TEMPLATE,
+                {
+                    "language": language,
+                    "func_name": func_name,
+                    "original": original_code,
+                    "bad_harness": bad_harness,
+                    "error_logs": error_logs,
+                    "context": context,
+                },
+                language,
+            )
         except Exception as e:
-            return bad_harness # Fallback to the original bad harness if the LLM fails
+            is_python = language.lower() == "python"
+            opener = "#" if is_python else "//"
+            return f"{opener} Failed to fix harness: {e}"

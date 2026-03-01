@@ -49,10 +49,16 @@ def process_function(func: dict, language: str, agent: AnalyzerAgent, sandbox: C
         # 2. Benchmark in Sandbox
         optimized_code = result["optimized_code"]
         harness_code = agent.generate_harness(func_name, original_code, optimized_code, language, context, hardware_target=hardware_target)
-        success, logs, plot_data = sandbox.execute_benchmark(harness_code, language)
 
-        # TODO: Commenting this out for now due to slowness -- will fix later        
-        # 3. AUTONOMOUS RETRY LOOP (Self-Healing & Speedup Verification)
+        # # Debug statement to test what AI output is generated        
+        # # Before you call the sandbox, let's see exactly what Gemini generated:
+        # print("\n" + "="*40 + " AI GENERATED HARNESS " + "="*40)
+        # print(harness_code)
+        # print("="*102 + "\n")
+        
+        success, logs, plot_data = sandbox.execute_benchmark(harness_code, language)
+ 
+        # AUTONOMOUS RETRY LOOP (Self-Healing & Speedup Verification)
         max_retries = 2
         retry_count = 0
         

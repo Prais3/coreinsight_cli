@@ -10,6 +10,12 @@ CoreInsight is a local-first, hardware-aware AI performance profiler. It shifts 
 
 ## Installation & Usage
 
+**Required: Install Docker: https://docs.docker.com/engine/install/** 
+
+**Optional (Suggested): Setup OpenAI/Anthropic/Google API keys to load their models**
+
+### TODO: Determine issue with gemini api failing to run code within sandbox environment.
+
 **1. Build locally:**
 Clone this repository and install it in editable mode:
 ```bash
@@ -22,7 +28,7 @@ Set up your preferred AI provider (Ollama, local vLLM, OpenAI, Anthropic, or Gem
 coreinsight configure
 ```
 
-**3. Build Global Context (Optional but Recommended):**
+**3. Build Global Context (Recommended for multiple files):**
 Index your repository so the AI understands your custom structs, classes, and dependencies across files:
 ```bash
 coreinsight index

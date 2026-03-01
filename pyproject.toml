@@ -11,6 +11,7 @@ requires-python = ">=3.8"
 dependencies = [
     "rich",
     "docker",
+    "tree-sitter==0.21.3",
     "tree-sitter-languages",
     "langchain",
     "langchain-core",
@@ -23,6 +24,9 @@ dependencies = [
     "sentence-transformers",
     "psutil"
 ]
+
+[tool.setuptools.package-data]
+coreinsight = ["Dockerfile.python-sandbox", "Dockerfile.cpp-sandbox"]
 
 [project.scripts]
 coreinsight = "coreinsight.main:main_cli"
