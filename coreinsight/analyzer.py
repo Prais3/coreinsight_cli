@@ -100,6 +100,46 @@ FIX INSTRUCTIONS:
 FORMATTING RULE: Wrap your ENTIRE fixed script in a single markdown code block. No text before or after.
 """
 
+_TEST_CASES_TEMPLATE = """
+You are a QA engineer writing correctness test cases for a function.
+
+FUNCTION NAME: {func_name}
+LANGUAGE: {language}
+
+FUNCTION SIGNATURE AND BODY:
+{original}
+
+GLOBAL DEPENDENCIES (helper functions / structs this function relies on):
+{context}
+
+Your task: generate {num_cases} diverse test cases that call `{func_name}` with different
+arguments. The cases must cover:
+  - Small inputs (N ~ 10)
+  - Medium inputs (N ~ 100-500)
+  - Edge cases: empty collections, single-element, all-zeros, negative values (where applicable)
+  - Boundary conditions specific to this function's logic
+
+OUTPUT FORMAT — respond with ONLY a valid JSON array, nothing else. No markdown fences,
+no explanation. Each element must be a JSON object with exactly two keys:
+  "args"  : a JSON array of positional arguments (use only JSON-serialisable types:
+            numbers, strings, booleans, arrays, objects — NO numpy, NO bytes)
+  "kwargs": a JSON object of keyword arguments (may be empty {{}})
+
+Example (do NOT copy this — generate cases specific to {func_name}):
+[
+  {{"args": [[1, 2, 3]], "kwargs": {{}}}},
+  {{"args": [[]], "kwargs": {{}}}},
+  {{"args": [[9, -1, 4, 0, 7]], "kwargs": {{"reverse": true}}}}
+]
+
+CONSTRAINTS:
+- All values must be plain JSON types — no numpy arrays, no custom objects.
+- If the function operates on a matrix, represent it as a list-of-lists.
+- If the function takes a size integer N, generate concrete data of that size inline.
+- Do NOT include function calls or expressions — only literal values.
+- Produce exactly {num_cases} test cases.
+"""
+
 
 class AnalyzerAgent:
     def __init__(self, provider="ollama", model_name="llama3.2", api_keys=None):
@@ -279,3 +319,53 @@ class AnalyzerAgent:
             is_python = language.lower() == "python"
             opener = "#" if is_python else "//"
             return f"{opener} Failed to fix harness: {e}"
+        
+    def generate_test_cases(
+        self,
+        func_name: str,
+        original_code: str,
+        language: str,
+        context: str = "",
+        num_cases: int = 8,
+    ) -> list:
+        """
+        Ask the LLM to generate diverse, JSON-serialisable test cases for
+        `func_name` so the sandbox can run correctness verification.
+
+        Returns a list of {"args": [...], "kwargs": {...}} dicts, or an
+        empty list if generation or parsing fails (sandbox skips gracefully).
+        """
+        import json
+
+        chain = PromptTemplate.from_template(_TEST_CASES_TEMPLATE) | self.base_llm
+        try:
+            result = chain.invoke({
+                "func_name": func_name,
+                "language": language,
+                "original": original_code,
+                "context": context or "None",
+                "num_cases": num_cases,
+            })
+            raw = result.content if hasattr(result, "content") else str(result)
+            if isinstance(raw, list):
+                raw = "\n".join(
+                    item["text"] if isinstance(item, dict) and "text" in item else str(item)
+                    for item in raw
+                )
+
+            # Strip markdown fences if the model wrapped anyway
+            raw = re.sub(r"```[a-zA-Z]*\s*", "", raw).strip()
+
+            cases = json.loads(raw)
+
+            # Validate structure — drop malformed entries silently
+            return [
+                case for case in cases
+                if isinstance(case, dict)
+                and isinstance(case.get("args"), list)
+                and isinstance(case.get("kwargs"), dict)
+            ]
+
+        except Exception as e:
+            logger.warning(f"generate_test_cases failed for '{func_name}': {e}")
+            return []

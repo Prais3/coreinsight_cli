@@ -3,7 +3,13 @@ import tempfile
 import docker
 import logging
 import importlib
-from typing import Tuple, Optional
+from typing import Tuple, Optional, List, Dict, Any
+
+import io
+import csv
+import math
+import json
+from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +22,129 @@ DOCKERFILES = {
     "python": "Dockerfile.python-sandbox",
     "cpp":    "Dockerfile.cpp-sandbox",
 }
+
+# ---------------------------------------------------------------------------
+# Verification constants
+# ---------------------------------------------------------------------------
+SPEEDUP_DISCREPANCY_TOLERANCE = 0.05  # max relative delta: computed vs reported speedup
+MIN_TIMING_ROWS = 2                   # minimum CSV rows to trust timing statistics
+FLOAT_RTOL = 1e-5                     # relative tolerance for output comparison
+FLOAT_ATOL = 1e-8                     # absolute tolerance for output comparison
+
+_PYTHON_CORRECTNESS_HARNESS = '''
+import json, sys, math, importlib.util, traceback
+
+spec = importlib.util.spec_from_file_location("user_module", "/workspace/source.py")
+mod  = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+original_fn  = getattr(mod, "{original_func_name}",  None)
+optimized_fn = getattr(mod, "{optimized_func_name}", None)
+
+if original_fn is None:
+    print(json.dumps({{"error": "source.py has no function named \'{original_func_name}\'"}}))
+    sys.exit(1)
+if optimized_fn is None:
+    print(json.dumps({{"error": "source.py has no function named \'{optimized_func_name}\'"}}))
+    sys.exit(1)
+
+with open("/workspace/test_cases.json") as fh:
+    test_cases = json.load(fh)
+
+FLOAT_RTOL = {rtol}
+FLOAT_ATOL = {atol}
+
+def _approx_equal(a, b, path=""):
+    if isinstance(a, float) and isinstance(b, float):
+        if not (math.isfinite(a) and math.isfinite(b)):
+            ok = (math.isnan(a) == math.isnan(b)) and (math.isinf(a) == math.isinf(b))
+            return ok, f"{{path}}: {{a}} vs {{b}}"
+        ok = abs(a - b) <= FLOAT_ATOL + FLOAT_RTOL * max(abs(a), abs(b))
+        return ok, f"{{path}}: {{a}} vs {{b}} (delta={{abs(a-b):.3e}})"
+    if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+        if len(a) != len(b):
+            return False, f"{{path}}: length {{len(a)}} vs {{len(b)}}"
+        for i, (x, y) in enumerate(zip(a, b)):
+            ok, msg = _approx_equal(x, y, f"{{path}}[{{i}}]")
+            if not ok:
+                return False, msg
+        return True, ""
+    if isinstance(a, dict) and isinstance(b, dict):
+        if set(a) != set(b):
+            return False, f"{{path}}: keys differ"
+        for k in a:
+            ok, msg = _approx_equal(a[k], b[k], f"{{path}}.{{k}}")
+            if not ok:
+                return False, msg
+        return True, ""
+    return (a == b), f"{{path}}: {{repr(a)}} vs {{repr(b)}}"
+
+results = []
+for i, case in enumerate(test_cases):
+    args   = case.get("args", [])
+    kwargs = case.get("kwargs", {{}})
+    try:
+        out_orig = original_fn(*args, **kwargs)
+        out_opt  = optimized_fn(*args, **kwargs)
+        ok, msg  = _approx_equal(out_orig, out_opt, "output")
+        results.append({{"case": i, "passed": ok, "detail": msg or "outputs match"}})
+    except Exception:
+        results.append({{"case": i, "passed": False, "detail": traceback.format_exc()}})
+
+print(json.dumps(results))
+'''.strip()
+
+
+@dataclass
+class SpeedupVerification:
+    verified: bool
+    computed_speedups: List[float] = field(default_factory=list)
+    reported_speedups: List[float] = field(default_factory=list)
+    max_discrepancy: Optional[float] = None
+    suspicious_flags: List[str] = field(default_factory=list)
+    details: str = ""
+
+
+@dataclass
+class CorrectnessVerification:
+    verified: bool
+    total_cases: int = 0
+    passed_cases: int = 0
+    failures: List[str] = field(default_factory=list)
+    details: str = ""
+
+
+@dataclass
+class VerificationResult:
+    speedup: SpeedupVerification
+    correctness: CorrectnessVerification
+
+    @property
+    def fully_verified(self) -> bool:
+        return self.speedup.verified and self.correctness.verified
+
+    def summary(self) -> str:
+        lines = [
+            "=== Verification Report ===",
+            f"Speedup integrity : {'✓ PASS' if self.speedup.verified else '✗ FAIL'}",
+            f"Output correctness: {'✓ PASS' if self.correctness.verified else '✗ FAIL'}",
+        ]
+        if self.speedup.computed_speedups:
+            avg = sum(self.speedup.computed_speedups) / len(self.speedup.computed_speedups)
+            lines.append(f"  Computed avg speedup : {avg:.3f}x")
+        if self.speedup.max_discrepancy is not None:
+            lines.append(f"  Max speedup discrepancy vs reported: {self.speedup.max_discrepancy:.2%}")
+        if self.speedup.suspicious_flags:
+            lines.append("  Suspicious flags: " + "; ".join(self.speedup.suspicious_flags))
+        if self.correctness.total_cases:
+            lines.append(f"  Correctness: {self.correctness.passed_cases}/{self.correctness.total_cases} test cases passed")
+        for f in self.correctness.failures:
+            lines.append(f"    ✗ {f}")
+        if self.speedup.details:
+            lines.append(f"  Speedup detail: {self.speedup.details}")
+        if self.correctness.details:
+            lines.append(f"  Correctness detail: {self.correctness.details}")
+        return "\n".join(lines)
 
 
 class CodeSandbox:
@@ -101,7 +230,7 @@ class CodeSandbox:
                     mem_limit="2g",
                     network_disabled=True,  # Only needs network if pip runs
                     device_requests=device_requests,
-                    environment={"OMP_NUM_THREADS": "1"},
+                    environment={"OMP_NUM_THREADS": "1", "PYTHONDONTWRITEBYTECODE": "1"},
                     pids_limit=200,
                     cap_drop=["ALL"] if language not in ["cuda", "cu", "cuh"] else [],
                 )
@@ -134,3 +263,301 @@ class CodeSandbox:
                         container.remove(force=True)
                     except Exception:
                         pass
+                    
+    def verify(
+        self,
+        csv_output: str,
+        original_code: str,
+        optimized_code: str,
+        original_func_name: str,
+        optimized_func_name: str,
+        test_cases: List[Dict[str, Any]],
+        language: str = "python",
+        timeout_seconds: int = 60,
+    ) -> VerificationResult:
+        speedup_result     = self._verify_speedup(csv_output)
+        correctness_result = self._verify_correctness(
+            original_code, optimized_code,
+            original_func_name, optimized_func_name,
+            test_cases, language, timeout_seconds,
+        )
+        return VerificationResult(speedup=speedup_result, correctness=correctness_result)
+
+    def _verify_speedup(self, csv_output: str) -> SpeedupVerification:
+        result = SpeedupVerification(verified=False)
+        try:
+            csv_header = "N,Original_Time,Optimized_Time,Speedup"
+            if csv_header in csv_output:
+                csv_output = csv_output[csv_output.find(csv_header):]
+            rows = list(csv.DictReader(io.StringIO(csv_output)))
+        except Exception as e:
+            result.details = f"CSV parse error: {e}"
+            return result
+
+        if not rows or not {"Original_Time", "Optimized_Time"}.issubset(rows[0].keys()):
+            result.details = "CSV is missing required timing columns."
+            return result
+        if len(rows) < MIN_TIMING_ROWS:
+            result.details = f"Too few timing rows ({len(rows)}); need ≥ {MIN_TIMING_ROWS}."
+            return result
+
+        computed_speedups, reported_speedups, orig_times, flags = [], [], [], []
+        max_discrepancy = 0.0
+
+        for i, row in enumerate(rows):
+            try:
+                t_orig = float(row["Original_Time"])
+                t_opt  = float(row["Optimized_Time"])
+            except ValueError:
+                flags.append(f"Row {i}: non-numeric timing values.")
+                continue
+            if t_orig <= 0 or t_opt <= 0:
+                flags.append(f"Row {i}: non-positive timing (orig={t_orig}, opt={t_opt}).")
+                continue
+            if t_orig == t_opt:
+                flags.append(f"Row {i}: original and optimized times are identical — likely a harness copy-paste error.")
+
+            computed = t_orig / t_opt
+            computed_speedups.append(computed)
+            orig_times.append(t_orig)
+
+            if "Speedup" in row:
+                try:
+                    reported = float(row["Speedup"])
+                    reported_speedups.append(reported)
+                    discrepancy = abs(computed - reported) / max(abs(computed), 1e-12)
+                    max_discrepancy = max(max_discrepancy, discrepancy)
+                    if discrepancy > SPEEDUP_DISCREPANCY_TOLERANCE:
+                        flags.append(
+                            f"Row {i}: reported speedup {reported:.4f}x ≠ computed {computed:.4f}x "
+                            f"(Δ={discrepancy:.2%} > {SPEEDUP_DISCREPANCY_TOLERANCE:.0%} threshold)."
+                        )
+                except ValueError:
+                    flags.append(f"Row {i}: non-numeric Speedup column value.")
+
+        if not computed_speedups:
+            result.details = "No valid timing rows after filtering."
+            return result
+
+        # Monotonicity: times should grow with N
+        if len(orig_times) >= 3:
+            inversions = sum(1 for a, b in zip(orig_times, orig_times[1:]) if b < a * 0.5)
+            if inversions > len(orig_times) // 3:
+                flags.append("Original timing is non-monotone with N — possible fabricated values.")
+
+        # Suspiciously round speedups
+        if len(computed_speedups) > 1 and all(abs(s - round(s)) < 1e-6 for s in computed_speedups):
+            flags.append("All computed speedups are exact integers — verify timer resolution.")
+
+        # High coefficient of variation
+        if len(computed_speedups) > 2:
+            mean = sum(computed_speedups) / len(computed_speedups)
+            std  = math.sqrt(sum((s - mean) ** 2 for s in computed_speedups) / len(computed_speedups))
+            cv = std / mean if mean else 0
+            # High CV is expected when algorithmic complexity class changes (e.g. O(N²)→O(N)),
+            # since speedup grows with N by design. Only flag if speedups are also non-monotone.
+            speedups_monotone = all(a <= b for a, b in zip(computed_speedups, computed_speedups[1:]))
+            if cv > 0.5 and not speedups_monotone:
+                flags.append(f"High speedup variance (CV={cv:.2f}) with non-monotone speedup — results may be fabricated.")
+
+        result.computed_speedups = computed_speedups
+        result.reported_speedups = reported_speedups
+        result.max_discrepancy   = max_discrepancy if reported_speedups else None
+        result.suspicious_flags  = flags
+
+        critical = [f for f in flags if "≠ computed" in f or "non-positive" in f or "non-numeric" in f]
+        result.verified = (len(critical) == 0)
+        avg = sum(computed_speedups) / len(computed_speedups)
+        result.details = (
+            f"Recomputed {len(computed_speedups)} speedup(s). Avg={avg:.3f}x. "
+            + (f"Max discrepancy vs reported: {max_discrepancy:.2%}." if reported_speedups else "No Speedup column to cross-check.")
+        )
+        return result
+
+    def _verify_correctness(
+        self,
+        original_code: str,
+        optimized_code: str,
+        original_func_name: str,
+        optimized_func_name: str,
+        test_cases: List[Dict[str, Any]],
+        language: str,
+        timeout_seconds: int,
+    ) -> CorrectnessVerification:
+        if not self.client:
+            return CorrectnessVerification(verified=False, details="Docker unavailable.")
+        if not test_cases:
+            return CorrectnessVerification(verified=False, details="No test cases provided — skipping correctness check.")
+        if language == "python":
+            return self._correctness_python(
+                original_code, optimized_code, original_func_name, optimized_func_name, test_cases, timeout_seconds
+            )
+        if language in ["cpp", "c++"]:
+            return self._correctness_cpp(
+                original_code, optimized_code, original_func_name, optimized_func_name, test_cases, timeout_seconds
+            )
+        return CorrectnessVerification(verified=False, details=f"Correctness not implemented for '{language}'.")
+
+    def _correctness_python(
+        self,
+        original_code: str,
+        optimized_code: str,
+        original_func_name: str,
+        optimized_func_name: str,
+        test_cases: List[Dict[str, Any]],
+        timeout_seconds: int,
+    ) -> CorrectnessVerification:
+        merged = (
+            "# === original ===\n" + original_code.strip()
+            + "\n\n# === optimized ===\n" + optimized_code.strip() + "\n"
+        )
+        harness = _PYTHON_CORRECTNESS_HARNESS.format(
+            original_func_name=original_func_name,
+            optimized_func_name=optimized_func_name,
+            rtol=FLOAT_RTOL,
+            atol=FLOAT_ATOL,
+        )
+        temp_dir = tempfile.mkdtemp()
+        try:
+            os.chmod(temp_dir, 0o777)
+            for fname, content in [
+                ("source.py",       merged),
+                ("harness.py",      harness),
+                ("test_cases.json", json.dumps(test_cases)),
+            ]:
+                p = os.path.join(temp_dir, fname)
+                with open(p, "w") as f:
+                    f.write(content)
+                os.chmod(p, 0o777)
+
+            container = None
+            try:
+                container = self.client.containers.run(
+                    image=SANDBOX_IMAGES["python"],
+                    command=["python", "-u", "-B", "-W", "ignore", "/workspace/harness.py"],
+                    volumes={temp_dir: {"bind": "/workspace", "mode": "rw"}},
+                    working_dir="/workspace",
+                    detach=True,
+                    mem_limit="1g",
+                    network_disabled=True,
+                    environment={"OMP_NUM_THREADS": "1"},
+                    pids_limit=100,
+                    cap_drop=["ALL"],
+                )
+                exit_code  = container.wait(timeout=timeout_seconds + 5)["StatusCode"]
+                raw_output = container.logs(stdout=True, stderr=True).decode("utf-8").strip()
+            except Exception as e:
+                return CorrectnessVerification(verified=False, details=f"Container error: {e}")
+            finally:
+                if container:
+                    try:
+                        container.remove(force=True)
+                    except Exception:
+                        pass
+
+        finally:
+            import shutil
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+        return self._parse_python_correctness_output(raw_output, exit_code, len(test_cases))
+
+    def _parse_python_correctness_output(
+        self, raw_output: str, exit_code: int, expected_cases: int
+    ) -> CorrectnessVerification:
+        result = CorrectnessVerification(verified=False, total_cases=expected_cases)
+        json_line = next(
+            (l.strip() for l in reversed(raw_output.splitlines()) if l.strip().startswith("[")),
+            None,
+        )
+        if not json_line:
+            result.details = f"No JSON output from harness (exit={exit_code}).\n{raw_output[:500]}"
+            return result
+        try:
+            cases = json.loads(json_line)
+        except json.JSONDecodeError as e:
+            result.details = f"JSON parse error: {e}"
+            return result
+
+        passed   = sum(1 for c in cases if c.get("passed"))
+        failures = [f"Case {c['case']}: {c.get('detail','')}" for c in cases if not c.get("passed")]
+        result.total_cases  = len(cases)
+        result.passed_cases = passed
+        result.failures     = failures
+        result.verified     = (passed == len(cases) and len(cases) > 0)
+        result.details      = f"{passed}/{len(cases)} test cases passed."
+        return result
+
+    def _correctness_cpp(
+        self,
+        original_code: str,
+        optimized_code: str,
+        original_func_name: str,
+        optimized_func_name: str,
+        test_cases: List[Dict[str, Any]],
+        timeout_seconds: int,
+    ) -> CorrectnessVerification:
+        merged = original_code.strip() + "\n\n" + optimized_code.strip()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            os.chmod(temp_dir, 0o777)
+            for fname, content in [
+                ("source.cpp",      merged),
+                ("test_cases.json", json.dumps(test_cases)),
+            ]:
+                p = os.path.join(temp_dir, fname)
+                with open(p, "w") as f:
+                    f.write(content)
+                os.chmod(p, 0o777)
+
+            container = None
+            try:
+                container = self.client.containers.run(
+                    image=SANDBOX_IMAGES["cpp"],
+                    command=["/bin/sh", "-c",
+                        f"timeout {timeout_seconds}s "
+                        f"g++ -O0 -DCOREINSIGHT_CORRECTNESS -std=c++17 source.cpp -o check && ./check"
+                    ],
+                    volumes={temp_dir: {"bind": "/workspace", "mode": "rw"}},
+                    working_dir="/workspace",
+                    detach=True,
+                    mem_limit="1g",
+                    network_disabled=True,
+                    environment={"OMP_NUM_THREADS": "1"},
+                    pids_limit=100,
+                    cap_drop=["ALL"],
+                )
+                exit_code  = container.wait(timeout=timeout_seconds + 5)["StatusCode"]
+                raw_output = container.logs(stdout=True, stderr=True).decode("utf-8")
+            except Exception as e:
+                return CorrectnessVerification(verified=False, details=f"Container error: {e}")
+            finally:
+                if container:
+                    try:
+                        container.remove(force=True)
+                    except Exception:
+                        pass
+
+        return self._parse_cpp_correctness_output(raw_output, exit_code, len(test_cases))
+
+    def _parse_cpp_correctness_output(
+        self, raw_output: str, exit_code: int, expected_cases: int
+    ) -> CorrectnessVerification:
+        result   = CorrectnessVerification(verified=False, total_cases=expected_cases)
+        passed, failures, parsed = 0, [], 0
+        for line in raw_output.splitlines():
+            parts = line.strip().split(None, 3)
+            if not parts or parts[0] != "CASE" or len(parts) < 3:
+                continue
+            parsed += 1
+            if parts[2].upper() == "PASS":
+                passed += 1
+            else:
+                failures.append(f"Case {parts[1]}: {parts[3] if len(parts) > 3 else ''}")
+        if parsed == 0:
+            result.details = f"No CASE lines in output (exit={exit_code}).\n{raw_output[:500]}"
+            return result
+        result.total_cases  = parsed
+        result.passed_cases = passed
+        result.failures     = failures
+        result.verified     = (passed == parsed)
+        result.details      = f"{passed}/{parsed} test cases passed."
+        return result

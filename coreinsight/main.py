@@ -44,7 +44,7 @@ def process_function(func: dict, language: str, agent: AnalyzerAgent, sandbox: C
         result = agent.analyze(original_code, language, context=context, hardware_target=hardware_target)
         
         if result.get("severity") in ["Error", "Low"] or not result.get("optimized_code"):
-            return func_name, None, None, "✅ No critical bottlenecks detected. Code is optimal."
+            return func_name, None, None, "✅ No critical bottlenecks detected. Code is optimal.", None
 
         # 2. Benchmark in Sandbox
         optimized_code = result["optimized_code"]
@@ -100,12 +100,26 @@ def process_function(func: dict, language: str, agent: AnalyzerAgent, sandbox: C
             logs = f"(Succeeded after {retry_count} AI retries)\n" + logs
         elif not is_valid_optimization:
             logs = f"(Failed to achieve valid CSV/Speedup after {retry_count} AI retries)\n" + logs
-            success = False # Force the UI to show a red X
+            success = False
 
-        return func_name, result, (success, logs, plot_data), None
+        # 3. Verification (only worth running if benchmark actually succeeded)
+        verification = None
+        if is_valid_optimization:
+            test_cases = agent.generate_test_cases(func_name, original_code, language, context)
+            verification = sandbox.verify(
+                csv_output=logs,
+                original_code=original_code,
+                optimized_code=optimized_code,
+                original_func_name=func_name,
+                optimized_func_name=func_name,  # update if your optimized fn was renamed
+                test_cases=test_cases,
+                language=language,
+            )
+
+        return func_name, result, (success, logs, plot_data), None, verification
         
     except Exception as e:
-        return func_name, None, None, f"❌ Analysis failed: {str(e)}"
+        return func_name, None, None, f"❌ Analysis failed: {str(e)}", None
 
 def parse_csv_logs(logs: str):
     """Safely extracts CSV data from the sandbox logs."""
@@ -118,7 +132,7 @@ def parse_csv_logs(logs: str):
             data.append(parts)
     return data
 
-def format_report_markdown(func_name: str, result: dict, sandbox_res: tuple, msg: str, language: str, target_dir: Path) -> str:
+def format_report_markdown(func_name: str, result: dict, sandbox_res: tuple, msg: str, language: str, target_dir: Path, verification=None) -> str:
     """Generates the text for the .md file."""
     if not result:
         return f"## Kernel: `{func_name}`\n{msg}\n\n---\n"
@@ -148,10 +162,24 @@ def format_report_markdown(func_name: str, result: dict, sandbox_res: tuple, msg
             f.write(plot_data)
         md += f"\n![Scaling Plot](./{plot_path.name})\n"
 
+    if verification is not None:
+        v = verification
+        speedup_icon    = "🟢" if v.speedup.verified     else "❌"
+        correct_icon    = "🟢" if v.correctness.verified  else "❌"
+        md += f"\n### Verification Report\n"
+        md += f"- {speedup_icon} **Speedup integrity:** {v.speedup.details}\n"
+        md += f"- {correct_icon} **Output correctness:** {v.correctness.details}\n"
+        if v.speedup.suspicious_flags:
+            for flag in v.speedup.suspicious_flags:
+                md += f"  - ⚠️ {flag}\n"
+        if v.correctness.failures:
+            for failure in v.correctness.failures:
+                md += f"  - ✗ {failure}\n"
+
     md += "\n---\n"
     return md
 
-def print_console_report(func_name: str, result: dict, sandbox_res: tuple, msg: str, language: str):
+def print_console_report(func_name: str, result: dict, sandbox_res: tuple, msg: str, language: str, verification=None):
     """Renders a beautiful, native Rich dashboard for the terminal."""
     if not result:
         console.print(Panel(f"[green]{msg}[/green]", title=f"Kernel: {func_name}"))
@@ -189,6 +217,29 @@ def print_console_report(func_name: str, result: dict, sandbox_res: tuple, msg: 
 
     if plot_data:
         content.append(Text(f"\n📈 Plot saved: {func_name}_benchmark_plot.png", style="italic blue"))
+
+    if verification is not None:
+        v = verification
+        speedup_color  = "green" if v.speedup.verified    else "red"
+        correct_color  = "green" if v.correctness.verified else "red"
+
+        vtable = Table(show_header=False, box=None, padding=(0, 1))
+        vtable.add_column(style="bold")
+        vtable.add_column()
+        vtable.add_row(
+            f"[{speedup_color}]Speedup integrity[/{speedup_color}]",
+            f"[{speedup_color}]{v.speedup.details}[/{speedup_color}]",
+        )
+        vtable.add_row(
+            f"[{correct_color}]Output correctness[/{correct_color}]",
+            f"[{correct_color}]{v.correctness.details}[/{correct_color}]",
+        )
+        for flag in v.speedup.suspicious_flags:
+            vtable.add_row("[yellow]⚠ Warning[/yellow]", f"[yellow]{flag}[/yellow]")
+        for failure in v.correctness.failures:
+            vtable.add_row("[red]✗ Failure[/red]", f"[red]{failure}[/red]")
+
+        content.append(Panel(vtable, title="🔬 Verification", border_style="dim"))
 
     console.print(Panel(Group(*content), title=f"🚀 Analysis: [bold]{func_name}[/bold]", border_style=color))
 
@@ -260,10 +311,10 @@ def run_analysis(file_path: str):
         for future in concurrent.futures.as_completed(future_to_func):
             func = future_to_func[future]
             try:
-                func_name, result, sandbox_res, msg = future.result()
+                func_name, result, sandbox_res, msg, verification = future.result()
                 
                 # 1. Format and save to Markdown file
-                output_md = format_report_markdown(func_name, result, sandbox_res, msg, language, path.parent)
+                output_md = format_report_markdown(func_name, result, sandbox_res, msg, language, path.parent, verification)
                 
                 # Write to File (Safely)
                 with file_lock:
@@ -272,7 +323,7 @@ def run_analysis(file_path: str):
                         
                 # 2. Print beautiful native UI to the terminal
                 with print_lock:
-                    print_console_report(func_name, result, sandbox_res, msg, language)
+                    print_console_report(func_name, result, sandbox_res, msg, language, verification)
                 
             except Exception as exc:
                 with print_lock:
