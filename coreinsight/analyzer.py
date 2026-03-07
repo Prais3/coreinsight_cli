@@ -1,4 +1,5 @@
 import re
+import logging
 from typing import Optional, List
 from pydantic import BaseModel, Field
 
@@ -12,6 +13,8 @@ from langchain_openai import ChatOpenAI
 from langchain_anthropic import ChatAnthropic
 
 from coreinsight.prompts import SYSTEM_PROMPT, ANALYSIS_TEMPLATE
+
+logger = logging.getLogger(__name__)
 
 
 class Bottleneck(BaseModel):
