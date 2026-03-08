@@ -2,19 +2,25 @@
 
 CoreInsight is a local-first, hardware-aware AI performance profiler. It shifts performance engineering "left" by parsing your Python, C++, and CUDA code, identifying hardware bottlenecks (like CPU cache thrashing or CUDA warp divergence), and mathematically verifying AI-generated optimizations inside secure Docker sandboxes.
 
+![CoreInsight Python](./examples/python_example.png)
+
 ## Prerequisites
 
 * **Python 3.9+**
 * **Docker Desktop / Docker Engine** (Must be running for the sandbox verification)
+    - Install Docker: https://docs.docker.com/engine/install/
 * **Ollama** (Optional, if using local models) or API keys for cloud models.
+* **Suggested:** Setup OpenAI/Anthropic/Google API keys to use those models
 
-## Installation & Usage
+## Install
 
-**Required: Install Docker: https://docs.docker.com/engine/install/** 
+```bash
+pip install coreinsight-cli
+```
 
-**Optional (Suggested): Setup OpenAI/Anthropic/Google API keys to load their models**
+## Usage
 
-**1. Build locally:**
+**1. Build Locally:**
 Clone this repository and install it in editable mode:
 ```bash
 pip install -e .
@@ -61,18 +67,5 @@ To build project elsewhere using wheel file:
 pip install dist/coreinsight_cli-*.whl
 ```
 
-To build project using source code:
-```bash
-pip install -e .
-```
-
 ### Architecture Notes
 CoreInsight runs 100% locally. Code is only transmitted to the AI provider you configure. If you use Ollama or a local server, your proprietary code never leaves your machine.
-
-## Current/Future Features In Progess:
-
-- Improve AST parsing
-- Extract and integrate hardware information for the LLM
-- Improve CLI interface
-- Parallel execution
-- Improve RAG
