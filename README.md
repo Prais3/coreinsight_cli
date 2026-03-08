@@ -14,8 +14,6 @@ CoreInsight is a local-first, hardware-aware AI performance profiler. It shifts 
 
 **Optional (Suggested): Setup OpenAI/Anthropic/Google API keys to load their models**
 
-### TODO: Determine issue with gemini api failing to run code within sandbox environment.
-
 **1. Build locally:**
 Clone this repository and install it in editable mode:
 ```bash
