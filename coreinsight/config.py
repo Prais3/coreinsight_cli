@@ -6,6 +6,31 @@ from rich.prompt import Prompt, Confirm
 console = Console()
 CONFIG_FILE = Path.home() / ".coreinsight" / "config.json"
 
+# TODO: swap for your real URL
+PRO_WAITLIST_URL = "https://tally.so/r/coreinsight-pro"
+
+CLOUD_PROVIDERS = ["openai", "anthropic", "google"]
+
+FREE_TIER_LIMITS = {
+    "max_functions":  3,
+    "max_retries":    2,
+    "num_test_cases": 8,
+}
+
+PRO_TIER_LIMITS = {
+    "max_functions":  None,   # unlimited
+    "max_retries":    5,
+    "num_test_cases": 15,
+}
+
+
+def is_pro(config: dict) -> bool:
+    return bool(config.get("pro", False))
+
+
+def get_tier_limits(config: dict) -> dict:
+    return PRO_TIER_LIMITS if is_pro(config) else FREE_TIER_LIMITS
+
 def load_config():
     if not CONFIG_FILE.exists():
         return {"provider": "ollama", "model_name": "llama3.2", "api_keys": {}}
@@ -24,11 +49,27 @@ def run_configure():
     config = load_config()
     
     provider = Prompt.ask(
-        "Which AI provider do you want to use?", 
-        choices=["ollama", "local_server", "openai", "anthropic", "google"], 
-        default=config.get("provider", "ollama")
+        "Which AI provider do you want to use?",
+        choices=["ollama", "local_server", "openai", "anthropic", "google"],
+        default=config.get("provider", "ollama"),
     )
-    
+
+    if provider in CLOUD_PROVIDERS and not is_pro(config):
+        from rich.panel import Panel
+        console.print(Panel(
+            f"[bold]Cloud providers ({', '.join(CLOUD_PROVIDERS)}) are a Pro feature.[/bold]\n\n"
+            f"Free tier supports [cyan]ollama[/cyan] and [cyan]local_server[/cyan] only.\n\n"
+            f"[yellow]Join the Pro waitlist:[/yellow] [cyan underline]{PRO_WAITLIST_URL}[/cyan underline]\n\n"
+            "[dim]Already have a Pro key? Run [cyan]coreinsight configure --pro-key <key>[/cyan] to unlock.[/dim]",
+            title="🔒  Pro Feature",
+            border_style="yellow",
+        ))
+        provider = Prompt.ask(
+            "Switch to a free provider instead?",
+            choices=["ollama", "local_server"],
+            default="ollama",
+        )
+
     config["provider"] = provider
     
     if provider == "ollama":

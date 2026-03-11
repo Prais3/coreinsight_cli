@@ -1,7 +1,10 @@
 import sys
+import json
 import argparse
 import concurrent.futures
 import threading
+import urllib.request
+import urllib.error
 from pathlib import Path
 from rich.console import Console
 from rich.markdown import Markdown
@@ -10,7 +13,7 @@ from rich.table import Table
 from rich.text import Text
 from rich.console import Group
 
-from coreinsight.config import load_config, run_configure
+from coreinsight.config import load_config, run_configure, is_pro, get_tier_limits, PRO_WAITLIST_URL
 from coreinsight.parser import CodeParser
 from coreinsight.analyzer import AnalyzerAgent
 from coreinsight.sandbox import CodeSandbox
@@ -31,7 +34,7 @@ def get_language_from_ext(file_path: Path) -> str:
     elif ext == '.py': return "python"
     return "unknown"
 
-def process_function(func: dict, language: str, agent: AnalyzerAgent, sandbox: CodeSandbox, indexer: RepoIndexer, hardware_target: str):
+def process_function(func: dict, language: str, agent: AnalyzerAgent, sandbox: CodeSandbox, indexer: RepoIndexer, hardware_target: str, tier_limits: dict):
     """Worker function to analyze and benchmark a single code kernel."""
     func_name = func['name']
     original_code = func['code']
@@ -59,7 +62,7 @@ def process_function(func: dict, language: str, agent: AnalyzerAgent, sandbox: C
         success, logs, plot_data = sandbox.execute_benchmark(harness_code, language)
  
         # AUTONOMOUS RETRY LOOP (Self-Healing & Speedup Verification)
-        max_retries = 2
+        max_retries = tier_limits["max_retries"]
         retry_count = 0
         
         def check_speedup_success(success_status, output_logs):
@@ -105,7 +108,7 @@ def process_function(func: dict, language: str, agent: AnalyzerAgent, sandbox: C
         # 3. Verification (only worth running if benchmark actually succeeded)
         verification = None
         if is_valid_optimization:
-            test_cases = agent.generate_test_cases(func_name, original_code, language, context)
+            test_cases = agent.generate_test_cases(func_name, original_code, language, context, num_cases=tier_limits["num_test_cases"])
             verification = sandbox.verify(
                 csv_output=logs,
                 original_code=original_code,
@@ -243,6 +246,68 @@ def print_console_report(func_name: str, result: dict, sandbox_res: tuple, msg: 
 
     console.print(Panel(Group(*content), title=f"🚀 Analysis: [bold]{func_name}[/bold]", border_style=color))
 
+def _preflight_checks(provider: str, model_name: str) -> bool:
+    """
+    Fast, cheap checks run before any expensive work (parsing, image building, threads).
+    Prints an actionable Rich panel and returns False on failure.
+    """
+    import docker as _docker
+
+    # ── 1. Docker ────────────────────────────────────────────────────────────
+    try:
+        _docker.from_env().ping()
+    except _docker.errors.DockerException as e:
+        console.print(Panel(
+            "[bold]CoreInsight requires Docker to run its verification sandboxes.[/bold]\n\n"
+            "[yellow]To fix:[/yellow]\n"
+            "  • [cyan]Mac / Windows[/cyan] — Open Docker Desktop and wait for the whale icon to stop animating\n"
+            "  • [cyan]Linux[/cyan]          — Run: [cyan]sudo systemctl start docker[/cyan]\n\n"
+            f"[dim]Docker error: {e}[/dim]",
+            title="❌  Docker is not running",
+            border_style="red",
+        ))
+        return False
+    except Exception as e:
+        console.print(f"[red]Unexpected error reaching Docker: {e}[/red]")
+        return False
+
+    # ── 2. Ollama (only when provider == "ollama") ────────────────────────────
+    if provider == "ollama":
+        try:
+            with urllib.request.urlopen("http://localhost:11434/api/tags", timeout=3) as resp:
+                data = json.loads(resp.read())
+
+            available = [m["name"] for m in data.get("models", [])]
+            base = model_name.split(":")[0]   # "llama3.2:latest" → "llama3.2"
+
+            if not any(base in m for m in available):
+                model_list = "\n".join(f"  • {m}" for m in available) or "  (none pulled yet)"
+                console.print(Panel(
+                    f"Model [cyan]{model_name}[/cyan] is not available in Ollama.\n\n"
+                    f"[yellow]To fix:[/yellow]\n"
+                    f"  Run: [cyan]ollama pull {model_name}[/cyan]\n\n"
+                    f"[bold]Models currently pulled:[/bold]\n{model_list}",
+                    title="❌  Ollama model not found",
+                    border_style="red",
+                ))
+                return False
+
+        except urllib.error.URLError:
+            console.print(Panel(
+                "[bold]CoreInsight defaults to Ollama for free local inference.[/bold]\n\n"
+                "[yellow]To fix:[/yellow]\n"
+                "  1. Install:    [cyan]https://ollama.com/download[/cyan]\n"
+                "  2. Start it:   [cyan]ollama serve[/cyan]  (auto-starts on most systems after install)\n"
+                "  3. Pull model: [cyan]ollama pull llama3.2[/cyan]\n\n"
+                "[bold]Prefer a cloud model instead?[/bold]\n"
+                "  Run: [cyan]coreinsight configure[/cyan]",
+                title="❌  Ollama is not running",
+                border_style="red",
+            ))
+            return False
+
+    return True
+
 def run_analysis(file_path: str):
     path = Path(file_path)
     if not path.exists() or not path.is_file():
@@ -258,8 +323,15 @@ def run_analysis(file_path: str):
     provider = config.get("provider", "ollama")
     model_name = config.get("model_name", "llama3.2")
     api_keys = config.get("api_keys", {})
+    tier_limits = get_tier_limits(config)
+    pro_user = is_pro(config)
 
-    console.print(Panel.fit(f"🚀 CoreInsight: Profiling [bold cyan]{path.name}[/bold cyan] via [bold]{provider}[/bold]"))
+    # ── Preflight: fail fast before AST parsing, image building, or thread spawning ──
+    if not _preflight_checks(provider, model_name):
+        sys.exit(1)
+
+    tier_label = "[bold green]Pro[/bold green]" if pro_user else "[bold yellow]Free[/bold yellow]"
+    console.print(Panel.fit(f"🚀 CoreInsight: Profiling [bold cyan]{path.name}[/bold cyan] via [bold]{provider}[/bold] · {tier_label}"))
 
     # 1. PARSE (Synchronous, since it's fast)
     with console.status("[yellow]Parsing AST and extracting hot loops...[/yellow]"):
@@ -270,6 +342,14 @@ def run_analysis(file_path: str):
     if not functions:
         console.print("[red]No parseable functions found in the file.[/red]")
         sys.exit(1)
+
+    max_fn = tier_limits["max_functions"]
+    if max_fn is not None and len(functions) > max_fn:
+        console.print(
+            f"[yellow]⚠ Free tier: analysing the first {max_fn} of {len(functions)} functions. "
+            f"Upgrade to Pro for unlimited → [cyan underline]{PRO_WAITLIST_URL}[/cyan underline][/yellow]"
+        )
+        functions = functions[:max_fn]
 
     console.print(f"[green]✅ Extracted {len(functions)} functional kernels.[/green]\n")
 
@@ -303,7 +383,7 @@ def run_analysis(file_path: str):
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Submit all functions to the thread pool
         future_to_func = {
-            executor.submit(process_function, func, language, agent, sandbox, indexer, hardware_target_str): func 
+            executor.submit(process_function, func, language, agent, sandbox, indexer, hardware_target_str, tier_limits): func
             for func in functions
         }
 
@@ -330,6 +410,17 @@ def run_analysis(file_path: str):
                     console.print(f"[bold red]❌ Critical failure in thread processing {func['name']}:[/bold red] {exc}")
 
     console.print(Panel.fit(f"✅ [bold green]Analysis Complete![/bold green] Final report saved to:\n{report_path.absolute()}"))
+
+    if not pro_user:
+        console.print(Panel(
+            "[bold]Enjoyed CoreInsight?[/bold] Pro unlocks:\n"
+            "  • [cyan]Cloud models[/cyan] (GPT-4o, Claude, Gemini)\n"
+            "  • [cyan]Unlimited functions[/cyan] per file\n"
+            "  • [cyan]5 retry attempts[/cyan] + deeper test coverage\n\n"
+            f"[yellow]Join the waitlist:[/yellow] [cyan underline]{PRO_WAITLIST_URL}[/cyan underline]",
+            title="⚡  Upgrade to Pro",
+            border_style="yellow",
+        ))
 
 def main_cli():
     parser = argparse.ArgumentParser(description="CoreInsight CLI - Local Hardware Optimization")

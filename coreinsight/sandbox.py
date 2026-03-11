@@ -149,11 +149,19 @@ class VerificationResult:
 
 class CodeSandbox:
     def __init__(self):
+        self._init_error: Optional[str] = None
         try:
             self.client = docker.from_env()
-        except Exception as e:
-            logger.error(f"Failed to connect to Docker daemon: {e}")
+            self.client.ping()          # actually proves the daemon is alive
+        except docker.errors.DockerException as e:
             self.client = None
+            self._init_error = str(e)
+            logger.error(f"Docker unavailable: {e}")
+            return
+        except Exception as e:
+            self.client = None
+            self._init_error = str(e)
+            logger.error(f"Unexpected Docker error: {e}")
             return
 
         # Prebake all non-CUDA images at startup
