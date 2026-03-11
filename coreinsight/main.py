@@ -1,4 +1,20 @@
 import sys
+import os
+import warnings
+
+# ── Suppress noisy third-party warnings before any imports trigger them ──────
+warnings.filterwarnings("ignore", category=FutureWarning, module="tree_sitter")
+warnings.filterwarnings("ignore", message=".*unauthenticated.*", category=UserWarning)
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+
+# Suppress chromadb's BertModel load report via transformers logger
+import logging as _logging
+_logging.getLogger("transformers").setLevel(_logging.ERROR)
+_logging.getLogger("sentence_transformers").setLevel(_logging.ERROR)
+_logging.getLogger("chromadb").setLevel(_logging.ERROR)
+
 import json
 import argparse
 import concurrent.futures
@@ -34,6 +50,11 @@ def get_language_from_ext(file_path: Path) -> str:
     elif ext == '.py': return "python"
     return "unknown"
 
+def _log(func_name: str, msg: str, style: str = "dim"):
+    """Thread-safe single-line progress log."""
+    with print_lock:
+        console.log(f"[{style}][ {func_name} ][/{style}] {msg}")
+
 def process_function(func: dict, language: str, agent: AnalyzerAgent, sandbox: CodeSandbox, indexer: RepoIndexer, hardware_target: str, tier_limits: dict):
     """Worker function to analyze and benchmark a single code kernel."""
     func_name = func['name']
@@ -41,16 +62,23 @@ def process_function(func: dict, language: str, agent: AnalyzerAgent, sandbox: C
     
     try:
         # 0. Fetch Global Context via RAG
+        _log(func_name, "Fetching RAG context...")
         context = indexer.get_context_for_code(original_code) if indexer else ""
         
         # 1. Analyze
+        _log(func_name, "Calling LLM for bottleneck analysis...")
         result = agent.analyze(original_code, language, context=context, hardware_target=hardware_target)
         
-        if result.get("severity") in ["Error", "Low"] or not result.get("optimized_code"):
+        if result.get("severity") == "Error":
+            error_msg = result.get("issue", "Unknown error during analysis.")
+            return func_name, None, None, f"❌ Analysis error: {error_msg}", None
+
+        if result.get("severity") == "Low" or not result.get("optimized_code"):
             return func_name, None, None, "✅ No critical bottlenecks detected. Code is optimal.", None
 
         # 2. Benchmark in Sandbox
         optimized_code = result["optimized_code"]
+        _log(func_name, "Generating benchmark harness...")
         harness_code = agent.generate_harness(func_name, original_code, optimized_code, language, context, hardware_target=hardware_target)
 
         # # Debug statement to test what AI output is generated        
@@ -59,8 +87,9 @@ def process_function(func: dict, language: str, agent: AnalyzerAgent, sandbox: C
         # print(harness_code)
         # print("="*102 + "\n")
         
+        _log(func_name, "Running benchmark in Docker sandbox...")
         success, logs, plot_data = sandbox.execute_benchmark(harness_code, language)
- 
+
         # AUTONOMOUS RETRY LOOP (Self-Healing & Speedup Verification)
         max_retries = tier_limits["max_retries"]
         retry_count = 0
@@ -94,7 +123,9 @@ def process_function(func: dict, language: str, agent: AnalyzerAgent, sandbox: C
                 else:
                     logs += "\nERROR: Your optimized code was SLOWER than the original. Rewrite it to be faster."
             
+            _log(func_name, f"Retry {retry_count + 1}/{max_retries} — asking LLM to fix harness...", style="yellow")
             harness_code = agent.fix_harness(func_name, original_code, harness_code, logs, language, context=context)
+            _log(func_name, f"Retry {retry_count + 1}/{max_retries} — re-running sandbox...", style="yellow")
             success, logs, plot_data = sandbox.execute_benchmark(harness_code, language)
             is_valid_optimization = check_speedup_success(success, logs)
             retry_count += 1
@@ -108,20 +139,24 @@ def process_function(func: dict, language: str, agent: AnalyzerAgent, sandbox: C
         # 3. Verification (only worth running if benchmark actually succeeded)
         verification = None
         if is_valid_optimization:
+            _log(func_name, "Generating correctness test cases...")
             test_cases = agent.generate_test_cases(func_name, original_code, language, context, num_cases=tier_limits["num_test_cases"])
+            _log(func_name, "Running correctness verification in Docker sandbox...")
             verification = sandbox.verify(
                 csv_output=logs,
                 original_code=original_code,
                 optimized_code=optimized_code,
                 original_func_name=func_name,
-                optimized_func_name=func_name,  # update if your optimized fn was renamed
+                optimized_func_name=func_name,
                 test_cases=test_cases,
                 language=language,
             )
 
+        _log(func_name, "Done ✓", style="bold green")
         return func_name, result, (success, logs, plot_data), None, verification
         
     except Exception as e:
+        _log(func_name, f"Failed: {e}", style="bold red")
         return func_name, None, None, f"❌ Analysis failed: {str(e)}", None
 
 def parse_csv_logs(logs: str):
@@ -362,7 +397,8 @@ def run_analysis(file_path: str):
         
         agent = AnalyzerAgent(provider=provider, model_name=model_name, api_keys=api_keys)
         sandbox = CodeSandbox()
-        indexer = RepoIndexer(str(path.parent))
+        db_path = path.parent / ".coreinsight_db"
+        indexer = RepoIndexer(str(path.parent)) if db_path.exists() else None
     except Exception as e:
         console.print(f"[red]Initialization Error:[/red] {e}")
         sys.exit(1)
@@ -422,11 +458,81 @@ def run_analysis(file_path: str):
             border_style="yellow",
         ))
 
+def run_demo(lang: str = "python"):
+    import shutil
+    import importlib.resources
+
+    # ── Config awareness: guide unconfigured users before doing any work ─────
+    config = load_config()
+    provider = config.get("provider", "ollama")
+    model_name = config.get("model_name", "llama3.2")
+
+    is_default = not (Path.home() / ".coreinsight" / "config.json").exists()
+    if is_default:
+        console.print(Panel(
+            "[bold]No configuration found.[/bold] CoreInsight defaults to [cyan]Ollama + llama3.2[/cyan].\n\n"
+            "[yellow]Quick setup options:[/yellow]\n"
+            "  [bold]Option A[/bold] — Local (free, no API key):\n"
+            "    1. Install Ollama: [cyan]https://ollama.com/download[/cyan]\n"
+            "    2. Pull a model:   [cyan]ollama pull deepseek-coder[/cyan]\n"
+            "    3. Run this again: [cyan]coreinsight demo[/cyan]\n\n"
+            "  [bold]Option B[/bold] — Cloud (requires API key):\n"
+            "    Run [cyan]coreinsight configure[/cyan] and choose your provider.\n\n"
+            "[dim]Continuing with default config — preflight will catch any issues.[/dim]",
+            title="⚙️  Setup Required",
+            border_style="yellow",
+        ))
+    else:
+        console.print(
+            f"[dim]Using configured provider: [bold]{provider}[/bold] / {model_name}[/dim]"
+        )
+
+    demo_dir = Path.cwd() / "coreinsight_demo"
+    demo_dir.mkdir(exist_ok=True)
+
+    if lang == "python":
+        demo_files = ["bad_loop.py", "data_processor.py"]
+        entry_file = "data_processor.py"
+    else:
+        demo_files = ["slow.cpp"]
+        entry_file = "slow.cpp"
+
+    # Copy bundled demo files into the local demo directory
+    for fname in demo_files:
+        src = importlib.resources.files("coreinsight.demo").joinpath(fname)
+        with importlib.resources.as_file(src) as p:
+            shutil.copy(str(p), demo_dir / fname)
+
+    console.print(Panel(
+        f"CoreInsight will analyse a built-in [bold cyan]{lang.upper()}[/bold cyan] example.\n\n"
+        f"[dim]Demo files copied to:[/dim] [underline]{demo_dir}[/underline]\n"
+        f"[dim]The full report will be saved there when analysis completes.[/dim]",
+        title="🎬  CoreInsight Demo",
+        border_style="cyan",
+    ))
+
+    # For Python: auto-index so RAG cross-file context is showcased
+    if lang == "python":
+        console.print("[dim]Auto-indexing demo files to showcase RAG cross-file context...[/dim]")
+        from coreinsight.indexer import RepoIndexer as _RepoIndexer
+        _RepoIndexer(str(demo_dir)).index_repository()
+        console.print()
+
+    run_analysis(str(demo_dir / entry_file))
+
 def main_cli():
     parser = argparse.ArgumentParser(description="CoreInsight CLI - Local Hardware Optimization")
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
     
     subparsers.add_parser("configure", help="Set up AI providers and API keys")
+
+    demo_parser = subparsers.add_parser("demo", help="Run CoreInsight on a built-in example file")
+    demo_parser.add_argument(
+        "--lang",
+        choices=["python", "cpp"],
+        default="python",
+        help="Language of the demo file (default: python)",
+    )
     
     analyze_parser = subparsers.add_parser("analyze", help="Analyze a local code file")
     analyze_parser.add_argument("file", help="The .cpp, .cu, or .py file to analyze")
@@ -442,6 +548,8 @@ def main_cli():
     
     if args.command == "configure":
         run_configure()
+    elif args.command == "demo":
+        run_demo(getattr(args, "lang", "python"))
     elif args.command == "analyze":
         run_analysis(args.file)
     elif args.command == "scan":
