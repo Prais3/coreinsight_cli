@@ -89,19 +89,23 @@ class RepoIndexer:
         """Retrieves related code (like structs/classes) to feed to the LLM."""
         if not self.db_path.exists():
             return ""
-        if self.collection.count() == 0:
+        try:
+            if self.collection.count() == 0:
+                return ""
+
+            results = self.collection.query(
+                query_texts=[code_snippet],
+                n_results=n_results,
+            )
+
+            if not results['documents'] or not results['documents'][0]:
+                return ""
+
+            context_blocks = []
+            for doc, meta in zip(results['documents'][0], results['metadatas'][0]):
+                context_blocks.append(f"// From {meta['file']} ({meta['name']}):\n{doc}")
+
+            return "\n\n".join(context_blocks)
+        except Exception as e:
+            logger.warning(f"ChromaDB context retrieval failed, continuing without RAG context: {e}")
             return ""
-            
-        results = self.collection.query(
-            query_texts=[code_snippet],
-            n_results=n_results
-        )
-        
-        if not results['documents'] or not results['documents'][0]:
-            return ""
-            
-        context_blocks = []
-        for doc, meta in zip(results['documents'][0], results['metadatas'][0]):
-            context_blocks.append(f"// From {meta['file']} ({meta['name']}):\n{doc}")
-            
-        return "\n\n".join(context_blocks)

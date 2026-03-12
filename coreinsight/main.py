@@ -491,6 +491,13 @@ def run_demo(lang: str = "python"):
     demo_dir = Path.cwd() / "coreinsight_demo"
     demo_dir.mkdir(exist_ok=True)
 
+    # Clear stale ChromaDB between language switches — a DB indexed for
+    # Python files is incompatible with a C++ demo run and causes tenant errors
+    stale_db = demo_dir / ".coreinsight_db"
+    if stale_db.exists():
+        import shutil as _shutil
+        _shutil.rmtree(stale_db, ignore_errors=True)
+
     if lang == "python":
         demo_files = ["bad_loop.py", "data_processor.py"]
         entry_file = "data_processor.py"
