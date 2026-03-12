@@ -23,6 +23,22 @@ PRO_TIER_LIMITS = {
     "num_test_cases": 15,
 }
 
+SMALL_MODELS  = ["llama3.2:3b", "llama3.2:1b", "codellama:7b", "llama3:7b", "mistral:7b"]
+MEDIUM_MODELS = ["codellama:13b", "llama3:13b", "mistral:13b", "llama3.1:8b"]
+CLOUD_MODELS  = ["openai", "anthropic", "google"]  # always large tier
+
+def get_model_tier(provider: str, model_name: str) -> str:
+    from coreinsight.prompts import ModelTier
+    if provider in CLOUD_MODELS:
+        return ModelTier.LARGE
+    name = model_name.lower()
+    if any(m in name for m in SMALL_MODELS):
+        return ModelTier.SMALL
+    if any(m in name for m in MEDIUM_MODELS):
+        return ModelTier.MEDIUM
+    # Unknown local model: default to MEDIUM (more guidance, less noise than SMALL)
+    return ModelTier.MEDIUM
+
 
 def is_pro(config: dict) -> bool:
     return bool(config.get("pro", False))
@@ -42,11 +58,22 @@ def save_config(config_data):
     with open(CONFIG_FILE, "w") as f:
         json.dump(config_data, f, indent=4)
 
-def run_configure():
+def run_configure(pro_key: str = None):
     """Interactive CLI to set up models and API keys."""
     console.print("[bold cyan]⚙️ CoreInsight Configuration[/bold cyan]")
-    
+
     config = load_config()
+
+    if pro_key is not None:
+        # TODO: validate against your backend when that exists
+        # For now, any non-empty key activates pro
+        if pro_key.strip():
+            config["pro"] = True
+            save_config(config)
+            console.print("[bold green]✅ Pro tier activated![/bold green]")
+        else:
+            console.print("[red]Invalid pro key.[/red]")
+        return
     
     provider = Prompt.ask(
         "Which AI provider do you want to use?",

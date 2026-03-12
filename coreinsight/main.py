@@ -29,7 +29,7 @@ from rich.table import Table
 from rich.text import Text
 from rich.console import Group
 
-from coreinsight.config import load_config, run_configure, is_pro, get_tier_limits, PRO_WAITLIST_URL
+from coreinsight.config import load_config, run_configure, is_pro, get_tier_limits, PRO_WAITLIST_URL, get_model_tier
 from coreinsight.parser import CodeParser
 from coreinsight.analyzer import AnalyzerAgent
 from coreinsight.sandbox import CodeSandbox
@@ -394,8 +394,9 @@ def run_analysis(file_path: str):
         hardware_target_str = HardwareDetector.format_for_llm(hardware_specs_dict)
         
         console.print(f"[dim]🎯 Target Hardware Detected: {hardware_target_str}[/dim]")
-        
-        agent = AnalyzerAgent(provider=provider, model_name=model_name, api_keys=api_keys)
+
+        model_tier = get_model_tier(provider, model_name)
+        agent = AnalyzerAgent(provider=provider, model_name=model_name, api_keys=api_keys, model_tier=model_tier)
         sandbox = CodeSandbox()
         db_path = path.parent / ".coreinsight_db"
         indexer = RepoIndexer(str(path.parent)) if db_path.exists() else None
@@ -524,7 +525,8 @@ def main_cli():
     parser = argparse.ArgumentParser(description="CoreInsight CLI - Local Hardware Optimization")
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
     
-    subparsers.add_parser("configure", help="Set up AI providers and API keys")
+    configure_parser = subparsers.add_parser("configure", help="Set up AI providers and API keys")
+    configure_parser.add_argument("--pro-key", dest="pro_key", help="Activate Pro tier with your key", default=None)
 
     demo_parser = subparsers.add_parser("demo", help="Run CoreInsight on a built-in example file")
     demo_parser.add_argument(
@@ -547,7 +549,7 @@ def main_cli():
     args = parser.parse_args()
     
     if args.command == "configure":
-        run_configure()
+        run_configure(pro_key=getattr(args, "pro_key", None))
     elif args.command == "demo":
         run_demo(getattr(args, "lang", "python"))
     elif args.command == "analyze":
