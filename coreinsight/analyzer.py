@@ -12,7 +12,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
 from langchain_anthropic import ChatAnthropic
 
-from coreinsight.prompts import SYSTEM_PROMPT, ANALYSIS_TEMPLATE
+from coreinsight.prompts import SYSTEM_PROMPT, ANALYSIS_TEMPLATE, HARNESS_ADDENDUM
 
 logger = logging.getLogger(__name__)
 
@@ -145,7 +145,8 @@ CONSTRAINTS:
 
 
 class AnalyzerAgent:
-    def __init__(self, provider="ollama", model_name="llama3.2", api_keys=None):
+    def __init__(self, provider="ollama", model_name="llama3.2", api_keys=None, model_tier="large"):
+        self.model_tier = model_tier
         self.parser = JsonOutputParser(pydantic_object=AuditResult)
         self.provider = provider
         api_keys = api_keys or {}
@@ -277,8 +278,10 @@ class AnalyzerAgent:
         hardware_target: str = "Generic CPU",
     ) -> str:
         try:
+            tiered_template = _HARNESS_TEMPLATE + HARNESS_ADDENDUM.get(self.model_tier, "")
+            
             return self._invoke_code_chain(
-                _HARNESS_TEMPLATE,
+                tiered_template,
                 {
                     "language": language,
                     "func_name": func_name,
@@ -306,8 +309,10 @@ class AnalyzerAgent:
         context: str = "",
     ) -> str:
         try:
+            tiered_template = _FIX_TEMPLATE + HARNESS_ADDENDUM.get(self.model_tier, "")
+            
             return self._invoke_code_chain(
-                _FIX_TEMPLATE,
+                tiered_template,
                 {
                     "language": language,
                     "func_name": func_name,
@@ -358,8 +363,27 @@ class AnalyzerAgent:
 
             # Strip markdown fences if the model wrapped anyway
             raw = re.sub(r"```[a-zA-Z]*\s*", "", raw).strip()
+            raw = re.sub(r"```", "", raw).strip()
 
-            cases = json.loads(raw)
+            # Sanitize Python literals that are invalid JSON
+            raw = re.sub(r"\bNone\b", "null", raw)
+            raw = re.sub(r"\bTrue\b", "true", raw)
+            raw = re.sub(r"\bFalse\b", "false", raw)
+            # Remove trailing commas before ] or }
+            raw = re.sub(r",\s*([\]}])", r"\1", raw)
+
+            # Extract the JSON array if extra text surrounds it
+            match = re.search(r"\[.*\]", raw, re.DOTALL)
+            if match:
+                raw = match.group(0)
+
+            try:
+                cases = json.loads(raw)
+            except json.JSONDecodeError:
+                # Fallback: ast.literal_eval handles Python literals
+                # (None, True, False, tuples) that LLMs commonly produce
+                import ast
+                cases = ast.literal_eval(raw)
 
             # Validate structure — drop malformed entries silently
             return [

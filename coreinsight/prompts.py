@@ -1,5 +1,52 @@
 from langchain_core.prompts import PromptTemplate
 
+class ModelTier:
+    SMALL  = "small"   # 7B and under: codellama:7b, llama3.2:3b
+    MEDIUM = "medium"  # 13B-34B: mistral, codellama:13b, local_server models
+    LARGE  = "large"   # 70B+, cloud: GPT-4, Claude, Gemini
+
+HARNESS_ADDENDUM = {
+    ModelTier.SMALL: """
+COMMON MISTAKES TO AVOID (read carefully):
+- NameError: PASTE both functions verbatim before calling them
+- IndexError: generate data OF LENGTH N, never use N as an index
+  Correct:   data = list(range(N))
+  Wrong:     data = my_list[N]
+- ImportError: sandbox has no internet, stdlib only
+- Missing CSV: your script MUST print the header line first
+
+TEMPLATE TO FOLLOW EXACTLY:
+```python
+# paste original function here
+def {func_name}(...): ...
+
+# paste optimized function here  
+def {func_name}_optimized(...): ...
+
+import time
+for N in [10, 100, 1000, 5000]:
+    data = list(range(N))  # generate fresh data of length N
+    
+    start = time.perf_counter()
+    original_fn(data)
+    orig = max(time.perf_counter() - start, 1e-9)
+    
+    start = time.perf_counter()
+    optimized_fn(data)
+    opt = max(time.perf_counter() - start, 1e-9)
+    
+    print(f"{{N}},{{orig:.6f}},{{opt:.6f}},{{orig/opt:.4f}}")
+```
+""",
+    ModelTier.MEDIUM: """
+REMINDERS:
+- Paste both functions inline before calling them
+- Generate data of length N, never index by N
+- CSV header must be printed before data rows
+""",
+    ModelTier.LARGE: ""  # large models follow the base template without scaffolding
+}
+
 SYSTEM_PROMPT = """
 You are a Senior HPC Performance Engineer, an elite, strict HPC Performance Architect, an elite Algorithmic Expert, and a strict Code Reviewer.
 Your goal is to optimize Python, C++, and CUDA code for maximum throughput and low latency, and perfect hardware utilization.
