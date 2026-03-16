@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "coreinsight-cli"
-version = "0.1.3"
+version = "0.1.5"
 description = "Local-first AI performance profiler that mathematically verifies optimizations for Python, C++, and CUDA"
 license = {text = "MIT"}
 authors = [
@@ -46,7 +46,12 @@ where = ["."]
 include = ["coreinsight*"]
 
 [tool.setuptools.package-data]
-coreinsight = ["Dockerfile.python-sandbox", "Dockerfile.cpp-sandbox"]
+coreinsight = [
+    "Dockerfile.python-sandbox",
+    "Dockerfile.cpp-sandbox",
+    "demo/*.py",
+    "demo/*.cpp",
+]
 
 [project.urls]
 Homepage = "https://github.com/Prais3/coreinsight_cli"

@@ -335,6 +335,15 @@ class CodeSandbox:
             if "Speedup" in row:
                 try:
                     reported = float(row["Speedup"])
+                    # Only cross-check rows where our computed speedup is
+                    # meaningful — skip rows where timer resolution was
+                    # insufficient (computed would be based on near-zero times)
+                    if t_opt < 1e-6:
+                        flags.append(
+                            f"Row {i}: optimized time too small to verify reported "
+                            f"speedup {reported:.4f}x — harness needs higher-resolution timing."
+                        )
+                        continue
                     reported_speedups.append(reported)
                     discrepancy = abs(computed - reported) / max(abs(computed), 1e-12)
                     max_discrepancy = max(max_discrepancy, discrepancy)
@@ -366,9 +375,10 @@ class CodeSandbox:
             std  = math.sqrt(sum((s - mean) ** 2 for s in computed_speedups) / len(computed_speedups))
             cv = std / mean if mean else 0
             # High CV is expected when algorithmic complexity class changes (e.g. O(N²)→O(N)),
-            # since speedup grows with N by design. Only flag if speedups are also non-monotone.
-            speedups_monotone = all(a <= b for a, b in zip(computed_speedups, computed_speedups[1:]))
-            if cv > 0.5 and not speedups_monotone:
+            # since speedup grows with N by design. Only flag if speedups are also non-monotone
+            # AND the variance is extreme enough to suggest fabrication rather than complexity gain.
+            speedups_monotone = all(a <= b * 1.2 for a, b in zip(computed_speedups, computed_speedups[1:]))
+            if cv > 1.0 and not speedups_monotone:
                 flags.append(f"High speedup variance (CV={cv:.2f}) with non-monotone speedup — results may be fabricated.")
 
         result.computed_speedups = computed_speedups

@@ -14,19 +14,27 @@ class RepoIndexer:
         self.repo_path = Path(repo_path)
         self.db_path = self.repo_path / ".coreinsight_db"
         self.parser = CodeParser()
-        
-        # Initialize local ChromaDB
-        self.chroma_client = chromadb.PersistentClient(path=str(self.db_path))
-        
-        # Use a lightweight, fast local embedding model
-        self.embedding_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
+        self._chroma_client = None
+        self._embedding_fn = None
+        self._collection = None
+
+    def _ensure_db(self):
+        """Lazy-initialize ChromaDB and the embedding model on first real use."""
+        if self._collection is not None:
+            return
+        self._chroma_client = chromadb.PersistentClient(path=str(self.db_path))
+        self._embedding_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
             model_name="all-MiniLM-L6-v2"
         )
-        
-        self.collection = self.chroma_client.get_or_create_collection(
+        self._collection = self._chroma_client.get_or_create_collection(
             name="codebase_context",
-            embedding_function=self.embedding_fn
+            embedding_function=self._embedding_fn,
         )
+
+    @property
+    def collection(self):
+        self._ensure_db()
+        return self._collection
 
     def index_repository(self):
         """Scans the repo and embeds all code blocks into the vector DB."""
@@ -79,19 +87,25 @@ class RepoIndexer:
 
     def get_context_for_code(self, code_snippet: str, n_results: int = 3) -> str:
         """Retrieves related code (like structs/classes) to feed to the LLM."""
-        if self.collection.count() == 0:
+        if not self.db_path.exists():
             return ""
-            
-        results = self.collection.query(
-            query_texts=[code_snippet],
-            n_results=n_results
-        )
-        
-        if not results['documents'] or not results['documents'][0]:
+        try:
+            if self.collection.count() == 0:
+                return ""
+
+            results = self.collection.query(
+                query_texts=[code_snippet],
+                n_results=n_results,
+            )
+
+            if not results['documents'] or not results['documents'][0]:
+                return ""
+
+            context_blocks = []
+            for doc, meta in zip(results['documents'][0], results['metadatas'][0]):
+                context_blocks.append(f"// From {meta['file']} ({meta['name']}):\n{doc}")
+
+            return "\n\n".join(context_blocks)
+        except Exception as e:
+            logger.warning(f"ChromaDB context retrieval failed, continuing without RAG context: {e}")
             return ""
-            
-        context_blocks = []
-        for doc, meta in zip(results['documents'][0], results['metadatas'][0]):
-            context_blocks.append(f"// From {meta['file']} ({meta['name']}):\n{doc}")
-            
-        return "\n\n".join(context_blocks)
