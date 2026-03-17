@@ -33,6 +33,7 @@ from coreinsight.config import load_config, run_configure, is_pro, get_tier_limi
 from coreinsight.parser import CodeParser
 from coreinsight.analyzer import AnalyzerAgent
 from coreinsight.sandbox import CodeSandbox
+from coreinsight.profiler import HardwareProfiler
 from coreinsight.indexer import RepoIndexer
 from coreinsight.hardware import HardwareDetector
 from coreinsight.scanner import ProjectScanner
@@ -55,7 +56,7 @@ def _log(func_name: str, msg: str, style: str = "dim"):
     with print_lock:
         console.log(f"[{style}][ {func_name} ][/{style}] {msg}")
 
-def process_function(func: dict, language: str, agent: AnalyzerAgent, sandbox: CodeSandbox, indexer: RepoIndexer, hardware_target: str, tier_limits: dict):
+def process_function(func: dict, language: str, agent: AnalyzerAgent, sandbox: CodeSandbox, indexer: RepoIndexer, hardware_target: str, tier_limits: dict, profiler=None, file_content: str = "", source_dir: str = ""):
     """Worker function to analyze and benchmark a single code kernel."""
     func_name = func['name']
     original_code = func['code']
@@ -71,10 +72,10 @@ def process_function(func: dict, language: str, agent: AnalyzerAgent, sandbox: C
         
         if result.get("severity") == "Error":
             error_msg = result.get("issue", "Unknown error during analysis.")
-            return func_name, None, None, f"❌ Analysis error: {error_msg}", None
+            return func_name, None, None, f"❌ Analysis error: {error_msg}", None, None
 
         if result.get("severity") == "Low" or not result.get("optimized_code"):
-            return func_name, None, None, "✅ No critical bottlenecks detected. Code is optimal.", None
+            return func_name, None, None, "✅ No critical bottlenecks detected. Code is optimal.", None, None
 
         # 2. Benchmark in Sandbox
         optimized_code = result["optimized_code"]
@@ -82,7 +83,7 @@ def process_function(func: dict, language: str, agent: AnalyzerAgent, sandbox: C
         harness_code = agent.generate_harness(func_name, original_code, optimized_code, language, context, hardware_target=hardware_target)
 
         # # Debug statement to test what AI output is generated        
-        # # Before you call the sandbox, let's see exactly what Gemini generated:
+        # # Before calling sandbox, see exactly what the model generated:
         # print("\n" + "="*40 + " AI GENERATED HARNESS " + "="*40)
         # print(harness_code)
         # print("="*102 + "\n")
@@ -136,8 +137,9 @@ def process_function(func: dict, language: str, agent: AnalyzerAgent, sandbox: C
             logs = f"(Failed to achieve valid CSV/Speedup after {retry_count} AI retries)\n" + logs
             success = False
 
-        # 3. Verification (only worth running if benchmark actually succeeded)
-        verification = None
+        # 3. Verification + AI-free hardware profiling
+        verification    = None
+        profiler_result = None
         if is_valid_optimization:
             _log(func_name, "Generating correctness test cases...")
             test_cases = agent.generate_test_cases(func_name, original_code, language, context, num_cases=tier_limits["num_test_cases"])
@@ -152,12 +154,25 @@ def process_function(func: dict, language: str, agent: AnalyzerAgent, sandbox: C
                 language=language,
             )
 
+            # AI-free hardware profiling (pro-gated)
+            if profiler is not None and tier_limits.get("hardware_profiling"):
+                _log(func_name, "Running AI-free hardware profiling...", style="blue")
+                profiler_result = profiler.profile(
+                    original_code=original_code,
+                    optimized_code=optimized_code,
+                    func_name=func_name,
+                    language=language,
+                    test_cases=test_cases,
+                    original_file_content=file_content,
+                    source_dir=source_dir,
+                )
+
         _log(func_name, "Done ✓", style="bold green")
-        return func_name, result, (success, logs, plot_data), None, verification
-        
+        return func_name, result, (success, logs, plot_data), None, verification, profiler_result
+
     except Exception as e:
         _log(func_name, f"Failed: {e}", style="bold red")
-        return func_name, None, None, f"❌ Analysis failed: {str(e)}", None
+        return func_name, None, None, f"❌ Analysis failed: {str(e)}", None, None
 
 def parse_csv_logs(logs: str):
     """Safely extracts CSV data from the sandbox logs."""
@@ -170,7 +185,7 @@ def parse_csv_logs(logs: str):
             data.append(parts)
     return data
 
-def format_report_markdown(func_name: str, result: dict, sandbox_res: tuple, msg: str, language: str, target_dir: Path, verification=None) -> str:
+def format_report_markdown(func_name: str, result: dict, sandbox_res: tuple, msg: str, language: str, target_dir: Path, verification=None, profiler_result=None) -> str:
     """Generates the text for the .md file."""
     if not result:
         return f"## Kernel: `{func_name}`\n{msg}\n\n---\n"
@@ -214,10 +229,34 @@ def format_report_markdown(func_name: str, result: dict, sandbox_res: tuple, msg
             for failure in v.correctness.failures:
                 md += f"  - ✗ {failure}\n"
 
+    if profiler_result is not None:
+        pr = profiler_result
+        md += f"\n### 🔬 Hardware Evidence (AI-Free Profiling)\n\n"
+        if pr.available:
+            md += f"> Measured by **`{pr.tool}`** inside Docker · no LLM involved · deterministic\n\n"
+            if pr.metrics:
+                md += "| Metric | Original | Optimized | Δ Delta | Note |\n"
+                md += "|:---|---:|---:|---:|:---|\n"
+                for m in pr.metrics:
+                    md += f"| {m.name} | {m.original} | {m.optimized} | **{m.delta}** | {m.note} |\n"
+            if pr.host_tool_metrics:
+                md += f"\n#### `{pr.host_tool_name}` — CPU hardware counters\n\n"
+                md += "| Metric | Original | Optimized | Δ Delta | Note |\n"
+                md += "|:---|---:|---:|---:|:---|\n"
+                for m in pr.host_tool_metrics:
+                    md += f"| {m.name} | {m.original} | {m.optimized} | **{m.delta}** | {m.note} |\n"
+            if pr.raw_original or pr.raw_optimized:
+                md += "\n<details><summary>cProfile detail (original)</summary>\n\n"
+                md += f"```\n{pr.raw_original.strip()}\n```\n\n</details>\n"
+                md += "\n<details><summary>cProfile detail (optimized)</summary>\n\n"
+                md += f"```\n{pr.raw_optimized.strip()}\n```\n\n</details>\n"
+        else:
+            md += f"> ⚠️ Hardware profiling unavailable: {pr.error}\n"
+
     md += "\n---\n"
     return md
 
-def print_console_report(func_name: str, result: dict, sandbox_res: tuple, msg: str, language: str, verification=None):
+def print_console_report(func_name: str, result: dict, sandbox_res: tuple, msg: str, language: str, verification=None, profiler_result=None):
     """Renders a beautiful, native Rich dashboard for the terminal."""
     if not result:
         console.print(Panel(f"[green]{msg}[/green]", title=f"Kernel: {func_name}"))
@@ -278,6 +317,33 @@ def print_console_report(func_name: str, result: dict, sandbox_res: tuple, msg: 
             vtable.add_row("[red]✗ Failure[/red]", f"[red]{failure}[/red]")
 
         content.append(Panel(vtable, title="🔬 Verification", border_style="dim"))
+
+    if profiler_result is not None and profiler_result.available:
+        pr = profiler_result
+        all_metrics = pr.metrics + pr.host_tool_metrics
+        if all_metrics:
+            ptable = Table(show_header=True, header_style="bold blue",
+                           box=None, padding=(0, 1), expand=True)
+            ptable.add_column("Metric",    style="dim")
+            ptable.add_column("Original",  justify="right")
+            ptable.add_column("Optimized", justify="right", style="cyan")
+            ptable.add_column("Δ Delta",   justify="right", style="bold")
+            ptable.add_column("Note",      style="dim italic")
+            for m in all_metrics:
+                delta_color = "green" if m.delta.startswith("-") else (
+                              "red"   if m.delta.startswith("+") else "white")
+                ptable.add_row(
+                    m.name, m.original, m.optimized,
+                    f"[{delta_color}]{m.delta}[/{delta_color}]",
+                    m.note,
+                )
+            tool_label = pr.tool
+            from rich.markup import escape as _escape
+            content.append(Panel(
+                ptable,
+                title=f"🔬 Hardware Evidence  \[{_escape(pr.tool)}]",
+                border_style="blue",
+            ))
 
     console.print(Panel(Group(*content), title=f"🚀 Analysis: [bold]{func_name}[/bold]", border_style=color))
 
@@ -372,6 +438,7 @@ def run_analysis(file_path: str):
     with console.status("[yellow]Parsing AST and extracting hot loops...[/yellow]"):
         parser = CodeParser()
         content_bytes = path.read_bytes()
+        file_content  = content_bytes.decode("utf-8", errors="replace")
         functions = parser.parse_file(str(path), content_bytes)
     
     if not functions:
@@ -396,10 +463,11 @@ def run_analysis(file_path: str):
         console.print(f"[dim]🎯 Target Hardware Detected: {hardware_target_str}[/dim]")
 
         model_tier = get_model_tier(provider, model_name)
-        agent = AnalyzerAgent(provider=provider, model_name=model_name, api_keys=api_keys, model_tier=model_tier)
+        agent   = AnalyzerAgent(provider=provider, model_name=model_name, api_keys=api_keys, model_tier=model_tier)
         sandbox = CodeSandbox()
         db_path = path.parent / ".coreinsight_db"
-        indexer = RepoIndexer(str(path.parent)) if db_path.exists() else None
+        indexer  = RepoIndexer(str(path.parent)) if db_path.exists() else None
+        profiler = HardwareProfiler() if pro_user else None
     except Exception as e:
         console.print(f"[red]Initialization Error:[/red] {e}")
         sys.exit(1)
@@ -420,7 +488,7 @@ def run_analysis(file_path: str):
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Submit all functions to the thread pool
         future_to_func = {
-            executor.submit(process_function, func, language, agent, sandbox, indexer, hardware_target_str, tier_limits): func
+            executor.submit(process_function, func, language, agent, sandbox, indexer, hardware_target_str, tier_limits, profiler, file_content, str(path.parent)): func
             for func in functions
         }
 
@@ -428,19 +496,19 @@ def run_analysis(file_path: str):
         for future in concurrent.futures.as_completed(future_to_func):
             func = future_to_func[future]
             try:
-                func_name, result, sandbox_res, msg, verification = future.result()
-                
+                func_name, result, sandbox_res, msg, verification, profiler_result = future.result()
+
                 # 1. Format and save to Markdown file
-                output_md = format_report_markdown(func_name, result, sandbox_res, msg, language, path.parent, verification)
-                
+                output_md = format_report_markdown(func_name, result, sandbox_res, msg, language, path.parent, verification, profiler_result)
+
                 # Write to File (Safely)
                 with file_lock:
                     with open(report_path, "a", encoding="utf-8") as f:
                         f.write(output_md)
-                        
+
                 # 2. Print beautiful native UI to the terminal
                 with print_lock:
-                    print_console_report(func_name, result, sandbox_res, msg, language, verification)
+                    print_console_report(func_name, result, sandbox_res, msg, language, verification, profiler_result)
                 
             except Exception as exc:
                 with print_lock:

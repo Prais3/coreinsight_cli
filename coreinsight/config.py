@@ -12,15 +12,17 @@ PRO_WAITLIST_URL = "https://tally.so/r/coreinsight-pro"
 CLOUD_PROVIDERS = ["openai", "anthropic", "google"]
 
 FREE_TIER_LIMITS = {
-    "max_functions":  3,
-    "max_retries":    2,
-    "num_test_cases": 8,
+    "max_functions":     3,
+    "max_retries":       2,
+    "num_test_cases":    8,
+    "hardware_profiling": False,
 }
 
 PRO_TIER_LIMITS = {
-    "max_functions":  None,   # unlimited
-    "max_retries":    5,
-    "num_test_cases": 15,
+    "max_functions":     None,   # unlimited
+    "max_retries":       5,
+    "num_test_cases":    15,
+    "hardware_profiling": True,
 }
 
 SMALL_MODELS  = ["llama3.2:3b", "llama3.2:1b", "codellama:7b", "llama3:7b", "mistral:7b"]
