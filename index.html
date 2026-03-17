@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CoreInsight CLI | Hardware-Aware AI Profiler</title>
+    <link rel="stylesheet" href="https://cdn.simplecss.org/simple.min.css">
+</head>
+<body>
+    <header>
+        <h1>CoreInsight</h1>
+        <p>A local-first, hardware-aware AI performance profiler and optimizer.</p>
+        <code>pip install coreinsight-cli</code>
+    </header>
+
+    <main>
+        <section>
+            <h2>More than a code generator</h2>
+            <p>CoreInsight parses Python, C++, and CUDA code to identify hardware bottlenecks like CPU cache thrashing and CUDA warp divergence. It generates optimized versions using local or cloud LLMs, but does not stop there.</p>
+            <p>Every optimization runs through a <strong>two-pillar mathematical verification system</strong> inside isolated Docker sandboxes:</p>
+            <ul>
+                <li><strong>Speedup Integrity:</strong> Recomputes speedup from raw timing columns and cross-checks against reported values to strictly flag LLM hallucinations.</li>
+                <li><strong>Output Correctness:</strong> Runs both original and optimized functions on identical, dynamically generated test inputs to ensure outputs match within a float tolerance.</li>
+            </ul>
+        </section>
+
+        <section>
+            <h2>Free vs. Pro Tier</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Feature</th>
+                        <th>Free Tier</th>
+                        <th>Pro Tier</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>LLM Providers</strong></td>
+                        <td>Local only (Ollama, LM Studio)</td>
+                        <td>Cloud + BYOK (OpenAI, Anthropic, Gemini)</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Scope</strong></td>
+                        <td>Up to 3 functions per file</td>
+                        <td>Unlimited functions</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Autonomous Retries</strong></td>
+                        <td>2 verification retries</td>
+                        <td>5 verification retries</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Correctness Tests</strong></td>
+                        <td>Standard test suite</td>
+                        <td>15 robust test cases per function</td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+
+        <section>
+            <h2>Links & Resources</h2>
+            <ul>
+                <li><a href="https://github.com/YOUR_GITHUB/coreinsight" target="_blank">View source on GitHub</a></li>
+                <li><a href="https://pypi.org/project/coreinsight-cli/" target="_blank">Download on PyPI</a></li>
+                <li><a href="#">Join the Pro Waitlist (Coming Soon)</a></li>
+            </ul>
+        </section>
+    </main>
+    
+    <footer>
+        <p>Open source core. Built for engineers.</p>
+    </footer>
+</body>
+</html>
