@@ -6,21 +6,25 @@ from rich.prompt import Prompt, Confirm
 console = Console()
 CONFIG_FILE = Path.home() / ".coreinsight" / "config.json"
 
-# TODO: swap for your real URL
-PRO_WAITLIST_URL = "https://tally.so/r/coreinsight-pro"
+PRO_WAITLIST_URL = "https://tally.so/r/xXZ9YE"
+
+# Raw URL of GitHub Gist - beta testing for new pro users
+PRO_KEYS_GIST_URL = "https://gist.githubusercontent.com/Prais3/4a57cf927734c6678602ff2066fc080c/raw/b4347c6ffea869490afb9a828802ec882ecd0eca/valid_keys.json"
 
 CLOUD_PROVIDERS = ["openai", "anthropic", "google"]
 
 FREE_TIER_LIMITS = {
-    "max_functions":  3,
-    "max_retries":    2,
-    "num_test_cases": 8,
+    "max_functions":     3,
+    "max_retries":       2,
+    "num_test_cases":    8,
+    "hardware_profiling": False,
 }
 
 PRO_TIER_LIMITS = {
-    "max_functions":  None,   # unlimited
-    "max_retries":    5,
-    "num_test_cases": 15,
+    "max_functions":     None,   # unlimited
+    "max_retries":       5,
+    "num_test_cases":    15,
+    "hardware_profiling": True,
 }
 
 SMALL_MODELS  = ["llama3.2:3b", "llama3.2:1b", "codellama:7b", "llama3:7b", "mistral:7b"]
@@ -65,14 +69,29 @@ def run_configure(pro_key: str = None):
     config = load_config()
 
     if pro_key is not None:
-        # TODO: validate against your backend when that exists
-        # For now, any non-empty key activates pro
-        if pro_key.strip():
-            config["pro"] = True
-            save_config(config)
-            console.print("[bold green]✅ Pro tier activated![/bold green]")
-        else:
-            console.print("[red]Invalid pro key.[/red]")
+        pro_key = pro_key.strip()
+        if not pro_key:
+            console.print("[red]❌ Invalid pro key format.[/red]")
+            return
+
+        console.print("[cyan]Verifying Pro key...[/cyan]")
+        key_hash = hashlib.sha256(pro_key.encode()).hexdigest()
+
+        try:
+            req = urllib.request.Request(PRO_KEYS_GIST_URL)
+            with urllib.request.urlopen(req, timeout=5) as response:
+                valid_hashes = json.loads(response.read().decode())
+            
+            if key_hash in valid_hashes:
+                config["pro"] = True
+                save_config(config)
+                console.print("[bold green]✅ Pro tier activated![/bold green]")
+            else:
+                config["pro"] = False
+                save_config(config)
+                console.print("[red]❌ Invalid or revoked Pro key.[/red]")
+        except Exception as e:
+            console.print("[red]⚠️ Could not verify key. Please check your internet connection or try again later.[/red]")
         return
     
     provider = Prompt.ask(
