@@ -3,74 +3,824 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CoreInsight CLI | Hardware-Aware AI Profiler</title>
-    <link rel="stylesheet" href="https://cdn.simplecss.org/simple.min.css">
+    <title>CoreInsight — Hardware-Aware AI Profiler</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg:        #080b0f;
+            --surface:   #0d1117;
+            --border:    #1c2535;
+            --green:     #00e5a0;
+            --green-dim: #00e5a020;
+            --amber:     #f0a500;
+            --amber-dim: #f0a50015;
+            --white:     #e8edf5;
+            --muted:     #4a5568;
+            --text:      #a0aec0;
+        }
+
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        html { scroll-behavior: smooth; }
+
+        body {
+            background: var(--bg);
+            color: var(--text);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 15px;
+            line-height: 1.7;
+            overflow-x: hidden;
+        }
+
+        /* ── Grid background ── */
+        body::before {
+            content: '';
+            position: fixed;
+            inset: 0;
+            background-image:
+                linear-gradient(rgba(0, 229, 160, 0.03) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(0, 229, 160, 0.03) 1px, transparent 1px);
+            background-size: 40px 40px;
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        /* ── Glow blobs ── */
+        .blob {
+            position: fixed;
+            border-radius: 50%;
+            filter: blur(120px);
+            pointer-events: none;
+            z-index: 0;
+            opacity: 0.18;
+        }
+        .blob-1 {
+            width: 600px; height: 600px;
+            background: var(--green);
+            top: -200px; right: -100px;
+            animation: drift 18s ease-in-out infinite alternate;
+        }
+        .blob-2 {
+            width: 400px; height: 400px;
+            background: var(--amber);
+            bottom: 10%; left: -100px;
+            animation: drift 24s ease-in-out infinite alternate-reverse;
+        }
+        @keyframes drift {
+            from { transform: translate(0, 0) scale(1); }
+            to   { transform: translate(40px, 30px) scale(1.1); }
+        }
+
+        /* ── Layout ── */
+        .wrap {
+            position: relative;
+            z-index: 1;
+            max-width: 1000px;
+            margin: 0 auto;
+            padding: 0 28px;
+        }
+
+        /* ── Nav ── */
+        nav {
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            border-bottom: 1px solid var(--border);
+            background: rgba(8, 11, 15, 0.85);
+            backdrop-filter: blur(16px);
+        }
+        nav .wrap {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding-top: 16px;
+            padding-bottom: 16px;
+        }
+        .nav-logo {
+            font-family: 'Syne', sans-serif;
+            font-weight: 800;
+            font-size: 18px;
+            color: var(--white);
+            text-decoration: none;
+            letter-spacing: -0.5px;
+        }
+        .nav-logo span { color: var(--green); }
+        .nav-links { display: flex; gap: 28px; list-style: none; }
+        .nav-links a {
+            color: var(--muted);
+            text-decoration: none;
+            font-size: 13px;
+            transition: color 0.2s;
+        }
+        .nav-links a:hover { color: var(--white); }
+        .nav-cta {
+            background: var(--green);
+            color: var(--bg) !important;
+            padding: 7px 16px;
+            border-radius: 4px;
+            font-weight: 500;
+            font-size: 13px !important;
+        }
+        .nav-cta:hover { opacity: 0.88; }
+
+        /* ── Hero ── */
+        .hero {
+            padding: 110px 0 80px;
+            position: relative;
+        }
+        .hero-eyebrow {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 12px;
+            font-weight: 500;
+            color: var(--green);
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            margin-bottom: 28px;
+            opacity: 0;
+            animation: fadeUp 0.6s 0.1s forwards;
+        }
+        .hero-eyebrow::before {
+            content: '';
+            display: block;
+            width: 24px; height: 1px;
+            background: var(--green);
+        }
+        h1 {
+            font-family: 'Syne', sans-serif;
+            font-size: clamp(42px, 7vw, 76px);
+            font-weight: 800;
+            line-height: 1.05;
+            letter-spacing: -2px;
+            color: var(--white);
+            margin-bottom: 28px;
+            opacity: 0;
+            animation: fadeUp 0.6s 0.2s forwards;
+        }
+        h1 em {
+            font-style: normal;
+            color: var(--green);
+        }
+        .hero-sub {
+            font-size: 16px;
+            color: var(--text);
+            max-width: 580px;
+            line-height: 1.8;
+            margin-bottom: 44px;
+            opacity: 0;
+            animation: fadeUp 0.6s 0.3s forwards;
+        }
+        .hero-sub strong { color: var(--white); font-weight: 500; }
+
+        .hero-actions {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            flex-wrap: wrap;
+            opacity: 0;
+            animation: fadeUp 0.6s 0.4s forwards;
+        }
+        .btn-primary {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            background: var(--green);
+            color: var(--bg);
+            text-decoration: none;
+            padding: 13px 26px;
+            border-radius: 4px;
+            font-weight: 600;
+            font-size: 14px;
+            transition: opacity 0.2s, transform 0.2s;
+        }
+        .btn-primary:hover { opacity: 0.88; transform: translateY(-1px); }
+
+        .btn-ghost {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            color: var(--white);
+            text-decoration: none;
+            padding: 13px 26px;
+            border-radius: 4px;
+            border: 1px solid var(--border);
+            font-size: 14px;
+            transition: border-color 0.2s, color 0.2s;
+        }
+        .btn-ghost:hover { border-color: var(--muted); }
+
+        .install-block {
+            margin-top: 36px;
+            display: inline-flex;
+            align-items: center;
+            gap: 12px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 12px 20px;
+            font-size: 13px;
+            color: var(--green);
+            opacity: 0;
+            animation: fadeUp 0.6s 0.5s forwards;
+        }
+        .install-block span { color: var(--muted); }
+
+        @keyframes fadeUp {
+            from { opacity: 0; transform: translateY(18px); }
+            to   { opacity: 1; transform: translateY(0); }
+        }
+
+        /* ── Section base ── */
+        section {
+            padding: 90px 0;
+            border-top: 1px solid var(--border);
+        }
+        .section-label {
+            font-size: 11px;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            color: var(--green);
+            margin-bottom: 16px;
+            font-weight: 500;
+        }
+        h2 {
+            font-family: 'Syne', sans-serif;
+            font-size: clamp(28px, 4vw, 42px);
+            font-weight: 800;
+            letter-spacing: -1px;
+            color: var(--white);
+            line-height: 1.1;
+            margin-bottom: 20px;
+        }
+        h3 {
+            font-family: 'Syne', sans-serif;
+            font-weight: 700;
+            font-size: 18px;
+            color: var(--white);
+            margin-bottom: 10px;
+        }
+        p { margin-bottom: 16px; }
+
+        /* ── Vision ── */
+        .vision-body {
+            font-size: 17px;
+            line-height: 1.85;
+            color: var(--text);
+            max-width: 720px;
+        }
+        .vision-body strong { color: var(--white); font-weight: 500; }
+
+        .vision-quote {
+            margin: 48px 0;
+            padding: 28px 32px;
+            border-left: 3px solid var(--green);
+            background: var(--green-dim);
+            border-radius: 0 6px 6px 0;
+            font-size: 18px;
+            color: var(--white);
+            font-family: 'Syne', sans-serif;
+            font-weight: 600;
+            line-height: 1.5;
+            letter-spacing: -0.3px;
+        }
+
+        /* ── Pillars ── */
+        .pillars {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 20px;
+            margin-top: 48px;
+        }
+        .pillar {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 28px;
+            transition: border-color 0.25s;
+        }
+        .pillar:hover { border-color: var(--green); }
+        .pillar-num {
+            font-size: 11px;
+            letter-spacing: 2px;
+            color: var(--green);
+            margin-bottom: 16px;
+            font-weight: 500;
+        }
+        .pillar p { font-size: 14px; color: var(--text); margin: 0; }
+
+        /* ── How it works ── */
+        .pipeline {
+            margin-top: 48px;
+            display: flex;
+            flex-direction: column;
+            gap: 0;
+        }
+        .step {
+            display: grid;
+            grid-template-columns: 52px 1fr;
+            gap: 20px;
+            position: relative;
+        }
+        .step:not(:last-child)::after {
+            content: '';
+            position: absolute;
+            left: 25px;
+            top: 52px;
+            bottom: 0;
+            width: 1px;
+            background: var(--border);
+        }
+        .step-num {
+            width: 52px; height: 52px;
+            border-radius: 50%;
+            border: 1px solid var(--border);
+            background: var(--surface);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+            color: var(--green);
+            font-weight: 500;
+            flex-shrink: 0;
+            z-index: 1;
+        }
+        .step-content {
+            padding: 12px 0 40px;
+        }
+        .step-content h3 { font-size: 16px; margin-bottom: 6px; }
+        .step-content p  { font-size: 14px; margin: 0; }
+        .step-tag {
+            display: inline-block;
+            font-size: 10px;
+            letter-spacing: 1.5px;
+            text-transform: uppercase;
+            padding: 2px 8px;
+            border-radius: 3px;
+            margin-left: 10px;
+            font-weight: 500;
+            vertical-align: middle;
+        }
+        .tag-new  { background: var(--green-dim);  color: var(--green); border: 1px solid var(--green)33; }
+        .tag-pro  { background: var(--amber-dim);  color: var(--amber); border: 1px solid var(--amber)33; }
+
+        /* ── Memory feature ── */
+        .memory-card {
+            margin-top: 48px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            overflow: hidden;
+        }
+        .memory-header {
+            padding: 24px 28px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .memory-dot {
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            background: var(--green);
+            box-shadow: 0 0 8px var(--green);
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50%       { opacity: 0.4; }
+        }
+        .memory-header h3 { margin: 0; font-size: 15px; }
+        .memory-body {
+            padding: 28px;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 24px;
+        }
+        @media (max-width: 600px) {
+            .memory-body { grid-template-columns: 1fr; }
+        }
+        .memory-stat { font-size: 14px; color: var(--text); }
+        .memory-stat strong {
+            display: block;
+            font-size: 28px;
+            font-family: 'Syne', sans-serif;
+            font-weight: 800;
+            color: var(--white);
+            letter-spacing: -1px;
+            line-height: 1;
+            margin-bottom: 4px;
+        }
+        .memory-stat strong span { color: var(--green); }
+
+        /* ── Table / Tiers ── */
+        .tier-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 40px;
+            font-size: 14px;
+        }
+        .tier-table th {
+            font-family: 'Syne', sans-serif;
+            font-weight: 700;
+            font-size: 13px;
+            padding: 14px 20px;
+            text-align: left;
+            border-bottom: 1px solid var(--border);
+            color: var(--white);
+        }
+        .tier-table th:last-child {
+            color: var(--amber);
+        }
+        .tier-table td {
+            padding: 13px 20px;
+            border-bottom: 1px solid var(--border);
+            color: var(--text);
+        }
+        .tier-table td:first-child { color: var(--white); font-weight: 500; }
+        .tier-table tr:last-child td { border-bottom: none; }
+        .tier-table tr:hover td { background: var(--surface); }
+        .check { color: var(--green); }
+        .dash  { color: var(--muted); }
+        .beta-badge {
+            display: inline-block;
+            font-size: 10px;
+            padding: 2px 7px;
+            background: var(--amber-dim);
+            color: var(--amber);
+            border: 1px solid var(--amber)44;
+            border-radius: 3px;
+            letter-spacing: 1px;
+            margin-left: 6px;
+            vertical-align: middle;
+        }
+
+        /* ── Beta CTA ── */
+        .beta-section {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 56px 48px;
+            text-align: center;
+            position: relative;
+            overflow: hidden;
+        }
+        .beta-section::before {
+            content: '';
+            position: absolute;
+            top: -60px; left: 50%;
+            transform: translateX(-50%);
+            width: 300px; height: 300px;
+            background: var(--green);
+            border-radius: 50%;
+            filter: blur(100px);
+            opacity: 0.07;
+        }
+        .beta-section h2 { margin-bottom: 16px; }
+        .beta-section p  { margin-bottom: 32px; max-width: 480px; margin-left: auto; margin-right: auto; }
+
+        /* ── Footer ── */
+        footer {
+            border-top: 1px solid var(--border);
+            padding: 40px 0;
+        }
+        footer .wrap {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 16px;
+        }
+        .footer-logo {
+            font-family: 'Syne', sans-serif;
+            font-weight: 800;
+            font-size: 16px;
+            color: var(--white);
+        }
+        .footer-logo span { color: var(--green); }
+        .footer-links { display: flex; gap: 24px; list-style: none; }
+        .footer-links a { color: var(--muted); text-decoration: none; font-size: 13px; }
+        .footer-links a:hover { color: var(--white); }
+        .footer-right { color: var(--muted); font-size: 12px; }
+
+        /* ── Responsive ── */
+        @media (max-width: 700px) {
+            nav .nav-links { display: none; }
+            .hero { padding: 80px 0 60px; }
+            .beta-section { padding: 40px 24px; }
+        }
+    </style>
 </head>
 <body>
-    <header>
-        <h1>CoreInsight</h1>
-        <p>A local-first, hardware-aware AI performance profiler and optimizer.</p>
-        <code>pip install coreinsight-cli</code>
-    </header>
 
-    <main>
-        <section>
-            <h2>More than a code generator</h2>
-            <p>CoreInsight parses Python, C++, and CUDA code to identify hardware bottlenecks like CPU cache thrashing and CUDA warp divergence. It generates optimized versions using local or cloud LLMs, but does not stop there.</p>
-            <p>Every optimization runs through a <strong>two-pillar mathematical verification system</strong> inside isolated Docker sandboxes:</p>
-            <ul>
-                <li><strong>Speedup Integrity:</strong> Recomputes speedup from raw timing columns and cross-checks against reported values to strictly flag LLM hallucinations.</li>
-                <li><strong>Output Correctness:</strong> Runs both original and optimized functions on identical, dynamically generated test inputs to ensure outputs match within a float tolerance.</li>
-            </ul>
-        </section>
+<div class="blob blob-1"></div>
+<div class="blob blob-2"></div>
 
-        <section>
-            <h2>Free vs. Pro Tier</h2>
-            <table>
-                <thead>
-                    <tr>
-                        <th>Feature</th>
-                        <th>Free Tier</th>
-                        <th>Pro Tier</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <tr>
-                        <td><strong>LLM Providers</strong></td>
-                        <td>Local only (Ollama, LM Studio)</td>
-                        <td>Cloud + BYOK (OpenAI, Anthropic, Gemini)</td>
-                    </tr>
-                    <tr>
-                        <td><strong>Scope</strong></td>
-                        <td>Limited functions per file</td>
-                        <td>Unlimited functions</td>
-                    </tr>
-                    <tr>
-                        <td><strong>Autonomous Retries</strong></td>
-                        <td>Limited verification retries</td>
-                        <td>More verification retries</td>
-                    </tr>
-                    <tr>
-                        <td><strong>Correctness Tests</strong></td>
-                        <td>Standard test suite</td>
-                        <td>More robust test cases for each function</td>
-                    </tr>
-                </tbody>
-            </table>
-        </section>
+<!-- ── Nav ── -->
+<nav>
+    <div class="wrap">
+        <a class="nav-logo" href="#">Core<span>Insight</span></a>
+        <ul class="nav-links">
+            <li><a href="#vision">Vision</a></li>
+            <li><a href="#how">How it works</a></li>
+            <li><a href="#memory">Memory</a></li>
+            <li><a href="#tiers">Tiers</a></li>
+            <li><a href="https://github.com/Prais3/coreinsight_cli" target="_blank">GitHub</a></li>
+            <li><a class="nav-cta" href="#beta">Get Pro →</a></li>
+        </ul>
+    </div>
+</nav>
 
-        <section>
-            <h2>Links & Resources</h2>
-            <ul>
-                <li><a href="https://github.com/Prais3/coreinsight_cli" target="_blank">View source on GitHub</a></li>
-                <li><a href="https://pypi.org/project/coreinsight-cli/" target="_blank">Download on PyPI</a></li>
-                <li><a href="#">Join the Pro Waitlist (Coming Soon)</a></li>
-            </ul>
-        </section>
-    </main>
-    
-    <footer>
-        <p>Open source core. Built for engineers.</p>
-    </footer>
+<!-- ── Hero ── -->
+<div class="wrap">
+    <div class="hero">
+        <div class="hero-eyebrow">Hardware-aware AI profiler</div>
+        <h1>Code that verifies<br>its own <em>intelligence</em></h1>
+        <p class="hero-sub">
+            CoreInsight parses Python, C++, and CUDA, identifies real hardware bottlenecks,
+            generates optimized code, and <strong>mathematically verifies the result</strong>
+            — no hallucinations accepted. The tool remembers every optimization it has ever verified.
+        </p>
+        <div class="hero-actions">
+            <a class="btn-primary" href="https://pypi.org/project/coreinsight-cli/" target="_blank">
+                Install on PyPI
+            </a>
+            <a class="btn-ghost" href="https://github.com/Prais3/coreinsight_cli" target="_blank">
+                View source ↗
+            </a>
+        </div>
+        <div class="install-block">
+            <span>$</span> pip install coreinsight-cli
+        </div>
+    </div>
+</div>
+
+<!-- ── Vision ── -->
+<section id="vision">
+    <div class="wrap">
+        <div class="section-label">Vision</div>
+        <h2>The beginning of<br>self-improving software</h2>
+        <div class="vision-body">
+            <p>
+                Today, CoreInsight profiles your code and verifies AI-generated optimizations
+                against hardware reality. But the direction is bigger than that.
+            </p>
+            <p>
+                Every verified optimization is stored and recalled. Every retry loop teaches
+                the tool what works on your hardware. Every benchmark is a data point in a
+                growing body of <strong>mathematical evidence about how code should run on silicon</strong>.
+            </p>
+            <div class="vision-quote">
+                "The goal is software that understands its own performance well enough to improve itself —
+                autonomously, verifiably, and without needing a human in the loop."
+            </div>
+            <p>
+                That is a hard problem. CoreInsight is the first step: an AI that does not just
+                generate code, but <strong>generates code it can prove is correct and faster</strong>.
+                Not because the LLM said so. Because the hardware said so.
+            </p>
+        </div>
+    </div>
+</section>
+
+<!-- ── Three pillars ── -->
+<section>
+    <div class="wrap">
+        <div class="section-label">Architecture</div>
+        <h2>Three pillars that<br>make it trustworthy</h2>
+        <div class="pillars">
+            <div class="pillar">
+                <div class="pillar-num">01 — VERIFICATION</div>
+                <h3>Two-pillar sandbox</h3>
+                <p>
+                    Every optimization runs through independent checks inside Docker:
+                    speedup integrity (recomputed from raw timing) and output correctness
+                    (identical test inputs, float tolerance). Hallucinated speedups are
+                    flagged and rejected.
+                </p>
+            </div>
+            <div class="pillar">
+                <div class="pillar-num">02 — EVIDENCE</div>
+                <h3>AI-free hardware profiling</h3>
+                <p>
+                    On top of sandbox verification, real tools — cProfile, perf stat —
+                    measure wall time, function calls, cache misses, and CPU cycles.
+                    These numbers come from silicon, not a language model.
+                    Deterministic. Auditable. Pro feature.
+                </p>
+            </div>
+            <div class="pillar">
+                <div class="pillar-num">03 — MEMORY</div>
+                <h3>Optimization memory</h3>
+                <p>
+                    A local vector database stores every verified result. On new analyses,
+                    semantically similar past optimizations are retrieved before the LLM
+                    is called. A match skips the entire pipeline and returns instantly —
+                    with full provenance.
+                </p>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ── How it works ── -->
+<section id="how">
+    <div class="wrap">
+        <div class="section-label">Pipeline</div>
+        <h2>What happens when<br>you run an analysis</h2>
+        <div class="pipeline">
+            <div class="step">
+                <div class="step-num">01</div>
+                <div class="step-content">
+                    <h3>Memory lookup <span class="step-tag tag-new">new</span></h3>
+                    <p>SHA-256 hash and semantic similarity search against every previously verified optimization. On a hit, skip steps 02–05 entirely.</p>
+                </div>
+            </div>
+            <div class="step">
+                <div class="step-num">02</div>
+                <div class="step-content">
+                    <h3>AST parsing + RAG context</h3>
+                    <p>tree-sitter extracts functions. ChromaDB retrieves cross-file dependencies so the LLM understands your structs, types, and helpers.</p>
+                </div>
+            </div>
+            <div class="step">
+                <div class="step-num">03</div>
+                <div class="step-content">
+                    <h3>Hardware-aware LLM analysis</h3>
+                    <p>Detected CPU/GPU specs are passed to the model alongside your code. The LLM identifies bottlenecks and writes an optimized replacement.</p>
+                </div>
+            </div>
+            <div class="step">
+                <div class="step-num">04</div>
+                <div class="step-content">
+                    <h3>Autonomous retry loop</h3>
+                    <p>Generated harness runs in Docker. If it fails or produces no real speedup, the LLM is sent the error and asked to fix it — up to 5 times.</p>
+                </div>
+            </div>
+            <div class="step">
+                <div class="step-num">05</div>
+                <div class="step-content">
+                    <h3>Mathematical verification</h3>
+                    <p>Speedup is recomputed from raw timing columns and cross-checked. Correctness is tested against LLM-generated inputs in a fresh container.</p>
+                </div>
+            </div>
+            <div class="step">
+                <div class="step-num">06</div>
+                <div class="step-content">
+                    <h3>AI-free hardware evidence <span class="step-tag tag-pro">pro</span></h3>
+                    <p>cProfile and perf stat run against both versions. Hardware counters are written to the report as deterministic, LLM-independent proof.</p>
+                </div>
+            </div>
+            <div class="step">
+                <div class="step-num">07</div>
+                <div class="step-content">
+                    <h3>Store to memory</h3>
+                    <p>The verified result, speedup, and profiler evidence are stored in the local vector database. The next time a similar function is seen, the pipeline starts at step 01.</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ── Memory ── -->
+<section id="memory">
+    <div class="wrap">
+        <div class="section-label">v0.2.0</div>
+        <h2>The tool gets smarter<br>every time you use it</h2>
+        <p style="max-width:580px;">
+            Optimization memory is the feature that moves CoreInsight from a stateless
+            code tool toward something that accumulates expertise. Every verified run
+            contributes to a local knowledge base that grows with your codebase.
+        </p>
+        <div class="memory-card">
+            <div class="memory-header">
+                <div class="memory-dot"></div>
+                <h3>Local optimization store — ~/.coreinsight/memory_db</h3>
+            </div>
+            <div class="memory-body">
+                <div class="memory-stat">
+                    <strong><span>⚡</span> Instant</strong>
+                    recall on exact and near-exact function matches — no LLM call, no Docker spin-up
+                </div>
+                <div class="memory-stat">
+                    <strong>100<span>%</span></strong>
+                    local — the store lives on your machine, never transmitted anywhere
+                </div>
+                <div class="memory-stat">
+                    <strong>SHA<span>-256</span></strong>
+                    exact hash match for identical functions, semantic cosine similarity for structural variants
+                </div>
+                <div class="memory-stat">
+                    <strong>Full<span> provenance</span></strong>
+                    every recalled result carries its original speedup, timestamp, and hardware evidence
+                </div>
+            </div>
+        </div>
+        <p style="margin-top:24px; font-size:13px; color: var(--muted);">
+            Inspect the store: <code style="color:var(--green)">coreinsight memory</code>
+            &nbsp;·&nbsp;
+            Clear it: <code style="color:var(--green)">coreinsight memory --clear</code>
+        </p>
+    </div>
+</section>
+
+<!-- ── Tiers ── -->
+<section id="tiers">
+    <div class="wrap">
+        <div class="section-label">Pricing</div>
+        <h2>Free by default.<br>Pro is free during beta.</h2>
+        <p>
+            Pro features are being unlocked manually during the beta period.
+            Request a key and get access immediately.
+        </p>
+        <table class="tier-table">
+            <thead>
+                <tr>
+                    <th>Feature</th>
+                    <th>Free</th>
+                    <th>Pro <span class="beta-badge">FREE BETA</span></th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>Ollama + LM Studio (local)</td>
+                    <td class="check">✓</td>
+                    <td class="check">✓</td>
+                </tr>
+                <tr>
+                    <td>OpenAI, Anthropic, Gemini (BYOK)</td>
+                    <td class="dash">—</td>
+                    <td class="check">✓</td>
+                </tr>
+                <tr>
+                    <td>Functions per file</td>
+                    <td>3</td>
+                    <td>Unlimited</td>
+                </tr>
+                <tr>
+                    <td>Autonomous retry attempts</td>
+                    <td>2</td>
+                    <td>5</td>
+                </tr>
+                <tr>
+                    <td>Correctness test cases</td>
+                    <td>8</td>
+                    <td>15</td>
+                </tr>
+                <tr>
+                    <td>AI-free hardware profiling (cProfile, perf stat)</td>
+                    <td class="dash">—</td>
+                    <td class="check">✓</td>
+                </tr>
+                <tr>
+                    <td>Optimization memory</td>
+                    <td class="check">✓</td>
+                    <td class="check">✓</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<!-- ── Beta CTA ── -->
+<section id="beta">
+    <div class="wrap">
+        <div class="beta-section">
+            <div class="section-label">Get Pro</div>
+            <h2>Request your Pro key</h2>
+            <p>
+                Pro is free during beta. Fill in the form and a key will be sent to you.
+                Takes 30 seconds to unlock cloud models and hardware profiling.
+            </p>
+            <div style="display:flex; gap:14px; justify-content:center; flex-wrap:wrap;">
+                <a class="btn-primary" href="https://tally.so/r/xXZ9YE" target="_blank">
+                    Request a Pro key →
+                </a>
+                <a class="btn-ghost" href="https://pypi.org/project/coreinsight-cli/" target="_blank">
+                    Install free tier
+                </a>
+            </div>
+            <p style="margin-top:28px; font-size:13px; color:var(--muted);">
+                Already have a key?&nbsp;
+                <code style="color:var(--green)">coreinsight configure --pro-key &lt;your-key&gt;</code>
+            </p>
+        </div>
+    </div>
+</section>
+
+<!-- ── Footer ── -->
+<footer>
+    <div class="wrap">
+        <div class="footer-logo">Core<span>Insight</span></div>
+        <ul class="footer-links">
+            <li><a href="https://github.com/Prais3/coreinsight_cli" target="_blank">GitHub</a></li>
+            <li><a href="https://pypi.org/project/coreinsight-cli/" target="_blank">PyPI</a></li>
+            <li><a href="https://tally.so/r/xXZ9YE" target="_blank">Get Pro</a></li>
+        </ul>
+        <div class="footer-right">Open core · local-first · v0.2.0</div>
+    </div>
+</footer>
+
 </body>
 </html>
