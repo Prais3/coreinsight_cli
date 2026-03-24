@@ -34,6 +34,7 @@ from coreinsight.parser import CodeParser
 from coreinsight.analyzer import AnalyzerAgent
 from coreinsight.sandbox import CodeSandbox
 from coreinsight.profiler import HardwareProfiler
+from coreinsight.memory import OptimizationMemory
 from coreinsight.indexer import RepoIndexer
 from coreinsight.hardware import HardwareDetector
 from coreinsight.scanner import ProjectScanner
@@ -56,7 +57,7 @@ def _log(func_name: str, msg: str, style: str = "dim"):
     with print_lock:
         console.log(f"[{style}][ {func_name} ][/{style}] {msg}")
 
-def process_function(func: dict, language: str, agent: AnalyzerAgent, sandbox: CodeSandbox, indexer: RepoIndexer, hardware_target: str, tier_limits: dict, profiler=None, file_content: str = "", source_dir: str = ""):
+def process_function(func: dict, language: str, agent: AnalyzerAgent, sandbox: CodeSandbox, indexer: RepoIndexer, hardware_target: str, tier_limits: dict, profiler=None, file_content: str = "", source_dir: str = "", memory=None):
     """Worker function to analyze and benchmark a single code kernel."""
     func_name = func['name']
     original_code = func['code']
@@ -65,17 +66,33 @@ def process_function(func: dict, language: str, agent: AnalyzerAgent, sandbox: C
         # 0. Fetch Global Context via RAG
         _log(func_name, "Fetching RAG context...")
         context = indexer.get_context_for_code(original_code) if indexer else ""
-        
+
+        # 0b. Memory lookup — skip LLM entirely if we've seen this pattern before
+        if memory:
+            memory_hit = memory.lookup(original_code, language)
+            if memory_hit:
+                label = "exact match" if memory_hit.is_exact else f"similarity {memory_hit.similarity:.1%}"
+                _log(func_name, f"⚡ Recalled from memory ({label}) — skipping LLM", style="bold cyan")
+                recalled_result = {
+                    "severity":       memory_hit.severity,
+                    "issue":          memory_hit.issue,
+                    "reasoning":      memory_hit.reasoning,
+                    "optimized_code": memory_hit.optimized_code,
+                    "suggestion":     "",
+                    "bottlenecks":    [],
+                }
+                return func_name, recalled_result, None, None, None, None, memory_hit, False
+
         # 1. Analyze
         _log(func_name, "Calling LLM for bottleneck analysis...")
         result = agent.analyze(original_code, language, context=context, hardware_target=hardware_target)
-        
+
         if result.get("severity") == "Error":
             error_msg = result.get("issue", "Unknown error during analysis.")
-            return func_name, None, None, f"❌ Analysis error: {error_msg}", None, None
+            return func_name, None, None, f"❌ Analysis error: {error_msg}", None, None, None, False
 
         if result.get("severity") == "Low" or not result.get("optimized_code"):
-            return func_name, None, None, "✅ No critical bottlenecks detected. Code is optimal.", None, None
+            return func_name, None, None, "✅ No critical bottlenecks detected. Code is optimal.", None, None, None, False
 
         # 2. Benchmark in Sandbox
         optimized_code = result["optimized_code"]
@@ -168,11 +185,11 @@ def process_function(func: dict, language: str, agent: AnalyzerAgent, sandbox: C
                 )
 
         _log(func_name, "Done ✓", style="bold green")
-        return func_name, result, (success, logs, plot_data), None, verification, profiler_result
+        return func_name, result, (success, logs, plot_data), None, verification, profiler_result, None, is_valid_optimization
 
     except Exception as e:
         _log(func_name, f"Failed: {e}", style="bold red")
-        return func_name, None, None, f"❌ Analysis failed: {str(e)}", None, None
+        return func_name, None, None, f"❌ Analysis failed: {str(e)}", None, None, None, False
 
 def parse_csv_logs(logs: str):
     """Safely extracts CSV data from the sandbox logs."""
@@ -185,22 +202,41 @@ def parse_csv_logs(logs: str):
             data.append(parts)
     return data
 
-def format_report_markdown(func_name: str, result: dict, sandbox_res: tuple, msg: str, language: str, target_dir: Path, verification=None, profiler_result=None) -> str:
+def format_report_markdown(func_name: str, result: dict, sandbox_res: tuple, msg: str, language: str, target_dir: Path, verification=None, profiler_result=None, memory_hit=None) -> str:
     """Generates the text for the .md file."""
     if not result:
         return f"## Kernel: `{func_name}`\n{msg}\n\n---\n"
-        
-    success, logs, plot_data = sandbox_res
+
     severity = result.get('severity', 'Medium')
-    sandbox_icon = "🟢" if success else "❌"
-    
-    md = f"## Kernel: `{func_name}`\n\n"
+    md  = f"## Kernel: `{func_name}`\n\n"
     md += f"**Severity:** {severity}\n\n"
     md += f"**Issue:** {result.get('issue')}\n\n"
     md += f"**Reasoning:**\n{result.get('reasoning')}\n\n"
     md += f"### Optimized Code\n```{language}\n{result.get('optimized_code')}\n```\n\n"
+
+    # ── Memory recall path — no sandbox results ─────────────────────────
+    if memory_hit is not None:
+        match_label = (
+            "Exact SHA-256 match" if memory_hit.is_exact
+            else f"Semantic similarity {memory_hit.similarity:.1%}"
+        )
+        md += f"### ⚡ Recalled from Optimization Memory\n\n"
+        md += f"> This optimization was **recalled from CoreInsight's local memory** — no LLM call was made.\n\n"
+        md += "| | |\n|:---|:---|\n"
+        md += f"| Match type | {match_label} |\n"
+        md += f"| Originally verified | `{memory_hit.timestamp}` |\n"
+        md += f"| Avg speedup achieved | **{memory_hit.avg_speedup:.2f}x** |\n"
+        md += f"| Correctness cases | {memory_hit.correctness_cases} passed |\n"
+        if memory_hit.profiler_summary:
+            md += f"| Hardware evidence | {memory_hit.profiler_summary} |\n"
+        md += "\n---\n"
+        return md
+
+    # ── Normal sandbox path ─────────────────────────────────────────────
+    success, logs, plot_data = sandbox_res
+    sandbox_icon = "🟢" if success else "❌"
     md += f"### Verification: {sandbox_icon} {'Success' if success else 'Failed'}\n"
-    
+
     csv_data = parse_csv_logs(logs)
     if success and csv_data:
         md += "| N (Size) | Orig Time (s) | Opt Time (s) | Speedup |\n| :--- | :--- | :--- | :--- |\n"
@@ -217,8 +253,8 @@ def format_report_markdown(func_name: str, result: dict, sandbox_res: tuple, msg
 
     if verification is not None:
         v = verification
-        speedup_icon    = "🟢" if v.speedup.verified     else "❌"
-        correct_icon    = "🟢" if v.correctness.verified  else "❌"
+        speedup_icon = "🟢" if v.speedup.verified    else "❌"
+        correct_icon = "🟢" if v.correctness.verified else "❌"
         md += f"\n### Verification Report\n"
         md += f"- {speedup_icon} **Speedup integrity:** {v.speedup.details}\n"
         md += f"- {correct_icon} **Output correctness:** {v.correctness.details}\n"
@@ -256,39 +292,55 @@ def format_report_markdown(func_name: str, result: dict, sandbox_res: tuple, msg
     md += "\n---\n"
     return md
 
-def print_console_report(func_name: str, result: dict, sandbox_res: tuple, msg: str, language: str, verification=None, profiler_result=None):
+def print_console_report(func_name: str, result: dict, sandbox_res: tuple, msg: str, language: str, verification=None, profiler_result=None, memory_hit=None):
     """Renders a beautiful, native Rich dashboard for the terminal."""
     if not result:
         console.print(Panel(f"[green]{msg}[/green]", title=f"Kernel: {func_name}"))
         return
 
-    success, logs, plot_data = sandbox_res
     severity = result.get('severity', 'Medium')
-    
-    color = "red" if severity == "Critical" else "yellow" if severity == "High" else "cyan"
-    
-    # 1. Header Information
+    color    = "red" if severity == "Critical" else "yellow" if severity == "High" else "cyan"
+
     content = [
         Text(f"Severity: {severity}", style=f"bold {color}"),
         Text(f"Issue: {result.get('issue')}", style="bold white"),
-        Text(f"Reasoning: {result.get('reasoning')}\n", style="dim white")
+        Text(f"Reasoning: {result.get('reasoning')}\n", style="dim white"),
     ]
 
-    # 2. Results Table
+    # ── Memory recall path ──────────────────────────────────────────────
+    if memory_hit is not None:
+        match_label = (
+            "Exact match" if memory_hit.is_exact
+            else f"Similarity {memory_hit.similarity:.1%}"
+        )
+        ts = memory_hit.timestamp[:19].replace("T", " ") + " UTC"
+        mtable = Table(show_header=False, box=None, padding=(0, 1))
+        mtable.add_column(style="bold cyan")
+        mtable.add_column()
+        mtable.add_row("Match type",  match_label)
+        mtable.add_row("Verified",    ts)
+        mtable.add_row("Avg speedup", f"[bold green]{memory_hit.avg_speedup:.2f}x[/bold green]")
+        mtable.add_row("Correctness", f"{memory_hit.correctness_cases} test cases passed")
+        if memory_hit.profiler_summary:
+            mtable.add_row("HW evidence", memory_hit.profiler_summary)
+        content.append(Panel(mtable, title="⚡ Recalled from Optimization Memory", border_style="cyan"))
+        console.print(Panel(Group(*content), title=f"⚡ Memory: [bold]{func_name}[/bold]", border_style="cyan"))
+        return
+
+    # ── Normal sandbox path ─────────────────────────────────────────────
+    success, logs, plot_data = sandbox_res
+
     csv_data = parse_csv_logs(logs)
     if csv_data:
         table = Table(show_header=True, header_style="bold magenta", expand=True)
-        table.add_column("N (Size)", justify="right")
-        table.add_column("Original (s)", justify="right", style="dim")
+        table.add_column("N (Size)",      justify="right")
+        table.add_column("Original (s)",  justify="right", style="dim")
         table.add_column("Optimized (s)", justify="right", style="green")
-        table.add_column("Speedup", justify="right", style="bold cyan")
-        
+        table.add_column("Speedup",       justify="right", style="bold cyan")
         for p in csv_data:
             table.add_row(p[0], p[1], p[2], f"{p[3]}x")
-        
         content.append(table)
     else:
-        # Fallback if no CSV was parsed (e.g. compilation error)
         status_color = "green" if success else "red"
         content.append(Panel(logs.strip(), title="Sandbox Logs", border_style=status_color))
 
@@ -297,9 +349,8 @@ def print_console_report(func_name: str, result: dict, sandbox_res: tuple, msg: 
 
     if verification is not None:
         v = verification
-        speedup_color  = "green" if v.speedup.verified    else "red"
-        correct_color  = "green" if v.correctness.verified else "red"
-
+        speedup_color = "green" if v.speedup.verified    else "red"
+        correct_color = "green" if v.correctness.verified else "red"
         vtable = Table(show_header=False, box=None, padding=(0, 1))
         vtable.add_column(style="bold")
         vtable.add_column()
@@ -315,7 +366,6 @@ def print_console_report(func_name: str, result: dict, sandbox_res: tuple, msg: 
             vtable.add_row("[yellow]⚠ Warning[/yellow]", f"[yellow]{flag}[/yellow]")
         for failure in v.correctness.failures:
             vtable.add_row("[red]✗ Failure[/red]", f"[red]{failure}[/red]")
-
         content.append(Panel(vtable, title="🔬 Verification", border_style="dim"))
 
     if profiler_result is not None and profiler_result.available:
@@ -337,7 +387,6 @@ def print_console_report(func_name: str, result: dict, sandbox_res: tuple, msg: 
                     f"[{delta_color}]{m.delta}[/{delta_color}]",
                     m.note,
                 )
-            tool_label = pr.tool
             from rich.markup import escape as _escape
             content.append(Panel(
                 ptable,
@@ -468,9 +517,17 @@ def run_analysis(file_path: str):
         db_path = path.parent / ".coreinsight_db"
         indexer  = RepoIndexer(str(path.parent)) if db_path.exists() else None
         profiler = HardwareProfiler() if pro_user else None
+        memory   = OptimizationMemory()
     except Exception as e:
         console.print(f"[red]Initialization Error:[/red] {e}")
         sys.exit(1)
+
+    mem_count = memory.stats().get("count", 0)
+    if mem_count > 0:
+        console.print(
+            f"[dim]⚡ Optimization memory: [bold cyan]{mem_count}[/bold cyan] "
+            f"verified optimization(s) in local store[/dim]"
+        )
 
     # Prepare Live Markdown File
     report_path = path.with_name(f"{path.stem}_coreinsight_report.md")
@@ -488,7 +545,7 @@ def run_analysis(file_path: str):
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Submit all functions to the thread pool
         future_to_func = {
-            executor.submit(process_function, func, language, agent, sandbox, indexer, hardware_target_str, tier_limits, profiler, file_content, str(path.parent)): func
+            executor.submit(process_function, func, language, agent, sandbox, indexer, hardware_target_str, tier_limits, profiler, file_content, str(path.parent), memory): func
             for func in functions
         }
 
@@ -496,10 +553,31 @@ def run_analysis(file_path: str):
         for future in concurrent.futures.as_completed(future_to_func):
             func = future_to_func[future]
             try:
-                func_name, result, sandbox_res, msg, verification, profiler_result = future.result()
+                func_name, result, sandbox_res, msg, verification, profiler_result, memory_hit, was_valid = future.result()
+
+                # Store if the benchmark actually ran and achieved real speedup.
+                # We use is_valid_optimization (≥1.05x measured speedup) rather
+                # than verification.speedup.verified because timer resolution at
+                # small N frequently causes the cross-check to flag a discrepancy
+                # even when the optimization is genuine.
+                if (
+                    memory_hit is None
+                    and was_valid
+                    and result is not None
+                ):
+                    stored = memory.store(
+                        original_code=func['code'],
+                        func_name=func_name,
+                        language=language,
+                        result=result,
+                        verification=verification,
+                        profiler_result=profiler_result,
+                    )
+                    if stored:
+                        _log(func_name, "💾 Stored in optimization memory", style="dim cyan")
 
                 # 1. Format and save to Markdown file
-                output_md = format_report_markdown(func_name, result, sandbox_res, msg, language, path.parent, verification, profiler_result)
+                output_md = format_report_markdown(func_name, result, sandbox_res, msg, language, path.parent, verification, profiler_result, memory_hit)
 
                 # Write to File (Safely)
                 with file_lock:
@@ -508,7 +586,7 @@ def run_analysis(file_path: str):
 
                 # 2. Print beautiful native UI to the terminal
                 with print_lock:
-                    print_console_report(func_name, result, sandbox_res, msg, language, verification, profiler_result)
+                    print_console_report(func_name, result, sandbox_res, msg, language, verification, profiler_result, memory_hit)
                 
             except Exception as exc:
                 with print_lock:
@@ -596,6 +674,106 @@ def run_demo(lang: str = "python"):
 
     run_analysis(str(demo_dir / entry_file))
 
+def _run_memory_cmd(clear: bool):
+    from coreinsight.memory import OptimizationMemory, MEMORY_DIR
+    import shutil
+
+    mem = OptimizationMemory()
+
+    if clear:
+        if MEMORY_DIR.exists():
+            shutil.rmtree(MEMORY_DIR, ignore_errors=True)
+            console.print("[bold green]✅ Optimization memory cleared.[/bold green]")
+        else:
+            console.print("[dim]Memory store was already empty.[/dim]")
+        return
+
+    stats = mem.stats()
+    count = stats.get("count", 0)
+
+    if count == 0:
+        console.print(Panel(
+            "No optimizations stored yet.\n\n"
+            "Run [cyan]coreinsight analyze[/cyan] or [cyan]coreinsight demo[/cyan] "
+            "to start building your memory store.",
+            title="⚡ Optimization Memory",
+            border_style="cyan",
+        ))
+        return
+
+    # Fetch all records with metadata
+    try:
+        if not mem._ensure_db():
+            console.print("[red]Could not open memory store.[/red]")
+            return
+
+        all_records = mem._collection.get(include=["metadatas", "ids"])
+        metadatas   = all_records.get("metadatas", []) or []
+        ids         = all_records.get("ids",       []) or []
+    except Exception as exc:
+        console.print(f"[red]Failed to read memory store: {exc}[/red]")
+        return
+
+    # Build the detail table
+    table = Table(
+        show_header=True,
+        header_style="bold cyan",
+        expand=True,
+        show_lines=True,
+    )
+    table.add_column("#",          justify="right",  style="dim",        width=4)
+    table.add_column("Function",   justify="left",   style="bold white")
+    table.add_column("Language",   justify="center", style="cyan",       width=10)
+    table.add_column("Speedup",    justify="right",  style="bold green", width=9)
+    table.add_column("Severity",   justify="center",                     width=10)
+    table.add_column("Issue",      justify="left",   style="dim white")
+    table.add_column("HW Evidence",justify="left",   style="dim",        width=22)
+    table.add_column("Verified",   justify="left",   style="dim",        width=20)
+
+    severity_colors = {
+        "Critical": "red",
+        "High":     "yellow",
+        "Medium":   "cyan",
+        "Low":      "green",
+    }
+
+    # Sort by timestamp descending — most recent first
+    paired = sorted(
+        zip(metadatas, ids),
+        key=lambda x: x[0].get("timestamp", ""),
+        reverse=True,
+    )
+
+    for i, (meta, rid) in enumerate(paired, start=1):
+        sev   = meta.get("severity", "High")
+        sev_c = severity_colors.get(sev, "white")
+        ts    = meta.get("timestamp", "")[:19].replace("T", " ")
+        hw    = meta.get("profiler_summary", "") or "—"
+        issue = (meta.get("issue", "") or "—")[:60]
+        if len(meta.get("issue", "")) > 60:
+            issue += "…"
+
+        table.add_row(
+            str(i),
+            meta.get("func_name", rid[:12]),
+            meta.get("language", "?"),
+            f"{float(meta.get('avg_speedup', 0)):.2f}x",
+            f"[{sev_c}]{sev}[/{sev_c}]",
+            issue,
+            hw,
+            ts,
+        )
+
+    console.print(Panel(
+        table,
+        title=f"⚡ Optimization Memory — [bold cyan]{count}[/bold cyan] stored",
+        border_style="cyan",
+    ))
+    console.print(
+        f"[dim]Store location: {MEMORY_DIR}  ·  "
+        f"Run [cyan]coreinsight memory --clear[/cyan] to wipe[/dim]"
+    )
+
 def main_cli():
     parser = argparse.ArgumentParser(description="CoreInsight CLI - Local Hardware Optimization")
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
@@ -617,6 +795,9 @@ def main_cli():
     index_parser = subparsers.add_parser("index", help="Index the current repository for global AI context")
     index_parser.add_argument("--dir", default=".", help="Directory to index")
     
+    memory_parser = subparsers.add_parser("memory", help="Inspect or clear the local optimization memory")
+    memory_parser.add_argument("--clear", action="store_true", help="Wipe the memory store")
+
     scan_parser = subparsers.add_parser("scan", help="Scan directory for complex hotspots")
     scan_parser.add_argument("--dir", default=".", help="Directory to scan")
     scan_parser.add_argument("--top", type=int, default=10, help="Number of hotspots to show")
@@ -629,6 +810,8 @@ def main_cli():
         run_demo(getattr(args, "lang", "python"))
     elif args.command == "analyze":
         run_analysis(args.file)
+    elif args.command == "memory":
+        _run_memory_cmd(getattr(args, "clear", False))
     elif args.command == "scan":
         scanner = ProjectScanner(args.dir)
         scanner.scan_project(max_results=args.top)
