@@ -29,9 +29,9 @@ from rich.table import Table
 from rich.text import Text
 from rich.console import Group
 
-from coreinsight.config import load_config, run_configure, is_pro, get_tier_limits, PRO_WAITLIST_URL, get_model_tier
+from coreinsight.config import load_config, run_configure, is_pro, get_tier_limits, PRO_WAITLIST_URL, get_model_tier, get_agent_mode
+from coreinsight.analyzer import AnalyzerAgent, BottleneckAgent, OptimizerAgent, HarnessAgent, TestCaseAgent
 from coreinsight.parser import CodeParser
-from coreinsight.analyzer import AnalyzerAgent
 from coreinsight.sandbox import CodeSandbox
 from coreinsight.profiler import HardwareProfiler
 from coreinsight.memory import OptimizationMemory
@@ -57,9 +57,128 @@ def _log(func_name: str, msg: str, style: str = "dim"):
     with print_lock:
         console.log(f"[{style}][ {func_name} ][/{style}] {msg}")
 
-def process_function(func: dict, language: str, agent: AnalyzerAgent, sandbox: CodeSandbox, indexer: RepoIndexer, hardware_target: str, tier_limits: dict, profiler=None, file_content: str = "", source_dir: str = "", memory=None):
+def _check_speedup_success(success: bool, logs: str) -> bool:
+    """Shared speedup validation used by both routing paths."""
+    if not success:
+        return False
+    try:
+        for line in reversed(logs.strip().split("\n")):
+            parts = line.split(",")
+            if len(parts) == 4 and parts[0].strip().isdigit():
+                return float(parts[3]) >= 1.05
+    except Exception:
+        pass
+    return False
+
+
+def _run_single_agent(
+    func_name, original_code, language, context,
+    hardware_target, sandbox, agent, tier_limits,
+):
+    """
+    Original single-agent pipeline.
+    Returns (result, optimized_code, success, logs, plot_data, is_valid).
+    """
+    result = agent.analyze(original_code, language, context=context, hardware_target=hardware_target)
+
+    if result.get("severity") == "Error":
+        return None, None, False, result.get("issue", "Unknown error"), None, False
+
+    if result.get("severity") == "Low" or not result.get("optimized_code"):
+        return result, None, False, "", None, False
+
+    optimized_code = result["optimized_code"]
+    harness_code   = agent.generate_harness(
+        func_name, original_code, optimized_code,
+        language, context, hardware_target=hardware_target,
+    )
+    success, logs, plot_data = sandbox.execute_benchmark(harness_code, language)
+
+    max_retries   = tier_limits["max_retries"]
+    retry_count   = 0
+    is_valid      = _check_speedup_success(success, logs)
+
+    while not is_valid and retry_count < max_retries:
+        if success:
+            if "N,Original_Time" not in logs:
+                logs += "\nERROR: Script ran but DID NOT print the CSV table. You MUST print the strict CSV format."
+            else:
+                logs += "\nERROR: Optimized code was SLOWER. Rewrite to be faster."
+        harness_code            = agent.fix_harness(func_name, original_code, harness_code, logs, language, context=context)
+        success, logs, plot_data = sandbox.execute_benchmark(harness_code, language)
+        is_valid                 = _check_speedup_success(success, logs)
+        retry_count             += 1
+
+    if is_valid and retry_count > 0:
+        logs = f"(Succeeded after {retry_count} retries)\n" + logs
+    elif not is_valid:
+        logs    = f"(Failed after {retry_count} retries)\n" + logs
+        success = False
+
+    return result, optimized_code, success, logs, plot_data, is_valid
+
+
+def _run_multi_agent(
+    func_name, original_code, language, context,
+    hardware_target, sandbox, multi_agents, tier_limits,
+):
+    """
+    Multi-agent pipeline.
+    BottleneckAgent  → analysis
+    OptimizerAgent   → code generation
+    HarnessAgent     ┐ parallel
+    TestCaseAgent    ┘
+    Returns (result, optimized_code, success, logs, plot_data, is_valid).
+    """
+    import concurrent.futures as _cf
+
+    # Step 1: bottleneck analysis
+    result = multi_agents["bottleneck"].analyze(
+        original_code, language,
+        context=context, hardware_target=hardware_target,
+    )
+    if result.get("severity") == "Error":
+        return None, None, False, result.get("issue", "Unknown error"), None, False
+    if result.get("severity") == "Low":
+        return result, None, False, "", None, False
+
+    # Step 2: optimized code generation
+    optimized_code = multi_agents["optimizer"].generate(
+        func_name, original_code, result,
+        language, context, hardware_target,
+    )
+    if not optimized_code or optimized_code == original_code:
+        return result, None, False, "", None, False
+
+    # Attach generated code to result dict so downstream code can read it
+    result["optimized_code"] = optimized_code
+
+    # Step 3: harness + test cases in parallel
+    with _cf.ThreadPoolExecutor(max_workers=2) as _pool:
+        harness_future = _pool.submit(
+            multi_agents["harness"].run,
+            func_name, original_code, optimized_code,
+            language, context, hardware_target,
+            sandbox, tier_limits["max_retries"],
+        )
+        testcase_future = _pool.submit(
+            multi_agents["testcase"].generate,
+            func_name, original_code, language,
+            context, tier_limits["num_test_cases"],
+        )
+        success, logs, plot_data, retry_count = harness_future.result()
+        _tc_result = testcase_future.result()   # stored for verify step below
+
+    is_valid = _check_speedup_success(success, logs)
+
+    # Stash test cases on the result dict so verify step can pick them up
+    result["_test_cases"] = _tc_result
+
+    return result, optimized_code, success, logs, plot_data, is_valid
+
+def process_function(func: dict, language: str, agent: AnalyzerAgent, sandbox: CodeSandbox, indexer: RepoIndexer, hardware_target: str, tier_limits: dict, profiler=None, file_content: str = "", source_dir: str = "", memory=None, agent_mode: str = "single", multi_agents: dict = None):
     """Worker function to analyze and benchmark a single code kernel."""
-    func_name = func['name']
+    func_name     = func['name']
     original_code = func['code']
     
     try:
@@ -83,83 +202,38 @@ def process_function(func: dict, language: str, agent: AnalyzerAgent, sandbox: C
                 }
                 return func_name, recalled_result, None, None, None, None, memory_hit, False
 
-        # 1. Analyze
-        _log(func_name, "Calling LLM for bottleneck analysis...")
-        result = agent.analyze(original_code, language, context=context, hardware_target=hardware_target)
+        # ── Route: single-agent vs multi-agent ──────────────────────────
+        if agent_mode == "multi" and multi_agents:
+            result, optimized_code, success, logs, plot_data, is_valid_optimization = \
+                _run_multi_agent(
+                    func_name, original_code, language, context,
+                    hardware_target, sandbox, multi_agents, tier_limits,
+                )
+        else:
+            result, optimized_code, success, logs, plot_data, is_valid_optimization = \
+                _run_single_agent(
+                    func_name, original_code, language, context,
+                    hardware_target, sandbox, agent, tier_limits,
+                )
 
-        if result.get("severity") == "Error":
-            error_msg = result.get("issue", "Unknown error during analysis.")
-            return func_name, None, None, f"❌ Analysis error: {error_msg}", None, None, None, False
+        if result is None:
+            return func_name, None, None, f"❌ Analysis error: {logs}", None, None, None, False
 
-        if result.get("severity") == "Low" or not result.get("optimized_code"):
+        if result.get("severity") == "Low" or not optimized_code:
             return func_name, None, None, "✅ No critical bottlenecks detected. Code is optimal.", None, None, None, False
-
-        # 2. Benchmark in Sandbox
-        optimized_code = result["optimized_code"]
-        _log(func_name, "Generating benchmark harness...")
-        harness_code = agent.generate_harness(func_name, original_code, optimized_code, language, context, hardware_target=hardware_target)
-
-        # # Debug statement to test what AI output is generated        
-        # # Before calling sandbox, see exactly what the model generated:
-        # print("\n" + "="*40 + " AI GENERATED HARNESS " + "="*40)
-        # print(harness_code)
-        # print("="*102 + "\n")
-        
-        _log(func_name, "Running benchmark in Docker sandbox...")
-        success, logs, plot_data = sandbox.execute_benchmark(harness_code, language)
-
-        # AUTONOMOUS RETRY LOOP (Self-Healing & Speedup Verification)
-        max_retries = tier_limits["max_retries"]
-        retry_count = 0
-        
-        def check_speedup_success(success_status, output_logs):
-            if not success_status: return False
-            
-            # Parse the CSV logs to find the final speedup
-            try:
-                lines = output_logs.strip().split('\n')
-                for line in reversed(lines):
-                    parts = line.split(',')
-                    # Make sure it actually found our CSV format
-                    if len(parts) == 4 and parts[0].strip().isdigit():
-                        speedup = float(parts[3])
-                        return speedup >= 1.05 # Require at least a 5% speedup
-            except Exception:
-                pass
-                
-            # If we reach here, it means the script ran successfully but DID NOT print the CSV.
-            # We must return False so the retry loop forces it to print the table.
-            return False
-
-        is_valid_optimization = check_speedup_success(success, logs)
-        
-        while not is_valid_optimization and retry_count < max_retries:
-            if success: 
-                # It ran without crashing, but failed our validation
-                if "N,Original_Time" not in logs:
-                    logs += "\nERROR: You ran successfully but DID NOT print the CSV table to stdout! You MUST print the strict CSV format."
-                else:
-                    logs += "\nERROR: Your optimized code was SLOWER than the original. Rewrite it to be faster."
-            
-            _log(func_name, f"Retry {retry_count + 1}/{max_retries} — asking LLM to fix harness...", style="yellow")
-            harness_code = agent.fix_harness(func_name, original_code, harness_code, logs, language, context=context)
-            _log(func_name, f"Retry {retry_count + 1}/{max_retries} — re-running sandbox...", style="yellow")
-            success, logs, plot_data = sandbox.execute_benchmark(harness_code, language)
-            is_valid_optimization = check_speedup_success(success, logs)
-            retry_count += 1
-
-        if is_valid_optimization and retry_count > 0:
-            logs = f"(Succeeded after {retry_count} AI retries)\n" + logs
-        elif not is_valid_optimization:
-            logs = f"(Failed to achieve valid CSV/Speedup after {retry_count} AI retries)\n" + logs
-            success = False
 
         # 3. Verification + AI-free hardware profiling
         verification    = None
         profiler_result = None
         if is_valid_optimization:
-            _log(func_name, "Generating correctness test cases...")
-            test_cases = agent.generate_test_cases(func_name, original_code, language, context, num_cases=tier_limits["num_test_cases"])
+            # Multi-agent: test cases already generated in parallel with harness
+            # Single-agent: generate them now
+            if agent_mode == "multi" and result.get("_test_cases") is not None:
+                test_cases = result["_test_cases"]
+                _log(func_name, "Using test cases from parallel TestCaseAgent...", style="dim")
+            else:
+                _log(func_name, "Generating correctness test cases...")
+                test_cases = agent.generate_test_cases(func_name, original_code, language, context, num_cases=tier_limits["num_test_cases"])
             _log(func_name, "Running correctness verification in Docker sandbox...")
             verification = sandbox.verify(
                 csv_output=logs,
@@ -512,15 +586,29 @@ def run_analysis(file_path: str):
         console.print(f"[dim]🎯 Target Hardware Detected: {hardware_target_str}[/dim]")
 
         model_tier = get_model_tier(provider, model_name)
-        agent   = AnalyzerAgent(provider=provider, model_name=model_name, api_keys=api_keys, model_tier=model_tier)
-        sandbox = CodeSandbox()
-        db_path = path.parent / ".coreinsight_db"
-        indexer  = RepoIndexer(str(path.parent)) if db_path.exists() else None
-        profiler = HardwareProfiler() if pro_user else None
-        memory   = OptimizationMemory()
+        agent      = AnalyzerAgent(provider=provider, model_name=model_name, api_keys=api_keys, model_tier=model_tier)
+        sandbox    = CodeSandbox()
+        db_path    = path.parent / ".coreinsight_db"
+        indexer    = RepoIndexer(str(path.parent)) if db_path.exists() else None
+        profiler   = HardwareProfiler() if pro_user else None
+        memory     = OptimizationMemory()
+
+        # Multi-agent setup — create specialized agents if mode requires it
+        agent_mode  = get_agent_mode(config)
+        multi_agents = None
+        if agent_mode == "multi":
+            multi_agents = {
+                "bottleneck": BottleneckAgent(provider=provider, model_name=model_name, api_keys=api_keys, model_tier=model_tier),
+                "optimizer":  OptimizerAgent( provider=provider, model_name=model_name, api_keys=api_keys, model_tier=model_tier),
+                "harness":    HarnessAgent(   provider=provider, model_name=model_name, api_keys=api_keys, model_tier=model_tier),
+                "testcase":   TestCaseAgent(  provider=provider, model_name=model_name, api_keys=api_keys, model_tier=model_tier),
+            }
     except Exception as e:
         console.print(f"[red]Initialization Error:[/red] {e}")
         sys.exit(1)
+
+    mode_label = "[bold cyan]Multi-Agent[/bold cyan]" if agent_mode == "multi" else "[dim]Single-Agent[/dim]"
+    console.print(f"[dim]⚙️  Agent mode: {mode_label}[/dim]")
 
     mem_count = memory.stats().get("count", 0)
     if mem_count > 0:
@@ -545,7 +633,7 @@ def run_analysis(file_path: str):
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Submit all functions to the thread pool
         future_to_func = {
-            executor.submit(process_function, func, language, agent, sandbox, indexer, hardware_target_str, tier_limits, profiler, file_content, str(path.parent), memory): func
+            executor.submit(process_function, func, language, agent, sandbox, indexer, hardware_target_str, tier_limits, profiler, file_content, str(path.parent), memory, agent_mode, multi_agents): func
             for func in functions
         }
 
@@ -781,7 +869,8 @@ def main_cli():
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
     
     configure_parser = subparsers.add_parser("configure", help="Set up AI providers and API keys")
-    configure_parser.add_argument("--pro-key", dest="pro_key", help="Activate Pro tier with your key", default=None)
+    configure_parser.add_argument("--pro-key",    dest="pro_key",    help="Activate Pro tier with your key", default=None)
+    configure_parser.add_argument("--agent-mode", dest="agent_mode", help="Set agent mode: single, multi, auto", default=None)
 
     demo_parser = subparsers.add_parser("demo", help="Run CoreInsight on a built-in example file")
     demo_parser.add_argument(
@@ -807,7 +896,10 @@ def main_cli():
     args = parser.parse_args()
     
     if args.command == "configure":
-        run_configure(pro_key=getattr(args, "pro_key", None))
+        run_configure(
+            pro_key=getattr(args, "pro_key", None),
+            agent_mode=getattr(args, "agent_mode", None),
+        )
     elif args.command == "demo":
         run_demo(getattr(args, "lang", "python"))
     elif args.command == "analyze":
