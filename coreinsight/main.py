@@ -599,9 +599,11 @@ def run_analysis(file_path: str):
             "[bold]Enjoyed CoreInsight?[/bold] Pro unlocks:\n"
             "  • [cyan]Cloud models[/cyan] (GPT-4o, Claude, Gemini)\n"
             "  • [cyan]Unlimited functions[/cyan] per file\n"
-            "  • [cyan]5 retry attempts[/cyan] + deeper test coverage\n\n"
-            f"[yellow]Join the waitlist:[/yellow] [cyan underline]{PRO_WAITLIST_URL}[/cyan underline]",
-            title="⚡  Upgrade to Pro",
+            "  • [cyan]5 retry attempts[/cyan] + deeper test coverage\n"
+            "  • [cyan]AI-free hardware profiling[/cyan] — cProfile + perf stat evidence in every report\n\n"
+            f"[bold yellow]Pro is free during beta.[/bold yellow] Request a key:\n"
+            f"[cyan underline]{PRO_WAITLIST_URL}[/cyan underline]",
+            title="⚡  Upgrade to Pro — free during beta",
             border_style="yellow",
         ))
 
