@@ -76,8 +76,17 @@ class OptimizationMemory:
         if self._init_error:
             return False
         try:
-            import chromadb
-            from chromadb.utils import embedding_functions
+            try:
+                import chromadb
+                from chromadb.utils import embedding_functions
+            except Exception as sqlite_exc:
+                self._init_error = (
+                    f"ChromaDB unavailable (likely outdated SQLite): {sqlite_exc}. "
+                    "Optimization memory disabled. "
+                    "Fix: pip install pysqlite3-binary and add the following to the top of memory.py:\n"
+                    "  import pysqlite3, sys; sys.modules['sqlite3'] = pysqlite3"
+                )
+                return False
 
             self._memory_dir.mkdir(parents=True, exist_ok=True)
             self._code_dir.mkdir(parents=True, exist_ok=True)

@@ -132,6 +132,18 @@ coreinsight configure
 coreinsight configure --pro-key <your-key>
 ```
 
+### `coreinsight configure [--agent-mode <mode>]`
+Choose between single-agent or multi-agent mode.
+Pass `--agent-mode multi` for multi-agent usage.
+```bash
+# Explicit override
+coreinsight configure --agent-mode multi
+coreinsight configure --agent-mode single
+
+# Reset to auto-selection
+coreinsight configure --agent-mode auto
+```
+
 ---
 
 ## Supported languages
