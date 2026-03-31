@@ -7,36 +7,33 @@ class ModelTier:
 
 HARNESS_ADDENDUM = {
     ModelTier.SMALL: """
-COMMON MISTAKES TO AVOID (read carefully):
-- NameError: PASTE both functions verbatim before calling them
-- IndexError: generate data OF LENGTH N, never use N as an index
-  Correct:   data = list(range(N))
-  Wrong:     data = my_list[N]
-- ImportError: sandbox has no internet, stdlib only
-- Missing CSV: your script MUST print the header line first
+CRITICAL RULES:
+1. The functions are already written above under "ORIGINAL FUNCTION" and "OPTIMIZED FUNCTION".
+   Copy them into your script WORD FOR WORD. Do NOT use stubs or placeholders.
+2. Look at the function signature carefully and generate realistic dummy arguments that match it.
+   Do NOT assume every function takes a single list — check the actual parameter names and types.
+3. Sandbox has NO internet — stdlib only, no pip installs.
+4. Print the CSV header FIRST, then one row per N. If any N crashes, print a row of zeros for it
+   and continue — never let one bad N kill the whole script.
 
-TEMPLATE TO FOLLOW EXACTLY:
-```python
-# paste original function here
-def {func_name}(...): ...
+STRUCTURE (replace ALL-CAPS placeholders with real code):
+  [copy original function here verbatim]
+  [copy optimized function here verbatim]
 
-# paste optimized function here  
-def {func_name}_optimized(...): ...
-
-import time
-for N in [10, 100, 1000, 5000]:
-    data = list(range(N))  # generate fresh data of length N
-    
-    start = time.perf_counter()
-    original_fn(data)
-    orig = max(time.perf_counter() - start, 1e-9)
-    
-    start = time.perf_counter()
-    optimized_fn(data)
-    opt = max(time.perf_counter() - start, 1e-9)
-    
-    print(f"{{N}},{{orig:.6f}},{{opt:.6f}},{{orig/opt:.4f}}")
-```
+  import time
+  print("N,Original_Time,Optimized_Time,Speedup")
+  for N in [10, 100, 1000, 5000]:  # {{N}} scaled dummy args
+      [generate dummy args matching the function signature, scaled to N]
+      try:
+          start = time.perf_counter()
+          [call original function with those args]
+          orig = max(time.perf_counter() - start, 1e-9)
+          start = time.perf_counter()
+          [call optimized function with those args]
+          opt = max(time.perf_counter() - start, 1e-9)
+          print(f"{{N}},{{orig:.6f}},{{opt:.6f}},{{orig/opt:.4f}}")
+      except Exception as e:
+          print(f"{N},0.0,0.0,0.0")
 """,
     ModelTier.MEDIUM: """
 REMINDERS:
@@ -264,34 +261,33 @@ REQUIREMENTS:
 # ── Per-tier addenda for multi-agent harness (same scaffolding pattern) ──────
 HARNESS_ADDENDUM_MULTI = {
     ModelTier.SMALL: """
-COMMON MISTAKES TO AVOID:
-- NameError: PASTE both functions verbatim before calling them
-- IndexError: generate data OF LENGTH N, never use N as an index
-  Correct:   data = list(range(N))
-  Wrong:     data = my_list[N]
-- ImportError: sandbox has no internet, stdlib only
-- Missing CSV: print the header line FIRST before any data rows
+CRITICAL RULES:
+1. The functions are already written above under "ORIGINAL FUNCTION" and "OPTIMIZED FUNCTION".
+   Copy them into your script WORD FOR WORD. Do NOT use stubs or placeholders.
+2. Look at the function signature carefully and generate realistic dummy arguments that match it.
+   Do NOT assume every function takes a single list — check the actual parameter names and types.
+3. Sandbox has NO internet — stdlib only, no pip installs.
+4. Print the CSV header FIRST, then one row per N. If any N crashes, print a row of zeros for it
+   and continue — never let one bad N kill the whole script.
 
-TEMPLATE TO FOLLOW EXACTLY:
-```python
-# paste original function here
-def {func_name}(...): ...
+STRUCTURE (replace ALL-CAPS placeholders with real code):
+  [copy original function here verbatim]
+  [copy optimized function here verbatim]
 
-# paste optimized function here
-def {func_name}_optimized(...): ...
-
-import time
-print("N,Original_Time,Optimized_Time,Speedup")
-for N in [10, 100, 1000, 5000]:
-    data = list(range(N))
-    start = time.perf_counter()
-    original_fn(data)
-    orig = max(time.perf_counter() - start, 1e-9)
-    start = time.perf_counter()
-    optimized_fn(data)
-    opt = max(time.perf_counter() - start, 1e-9)
-    print(f"{{N}},{{orig:.6f}},{{opt:.6f}},{{orig/opt:.4f}}")
-```
+  import time
+  print("N,Original_Time,Optimized_Time,Speedup")
+  for N in [10, 100, 1000, 5000]:  # {{N}} scaled dummy args
+      [generate dummy args matching the function signature, scaled to N]
+      try:
+          start = time.perf_counter()
+          [call original function with those args]
+          orig = max(time.perf_counter() - start, 1e-9)
+          start = time.perf_counter()
+          [call optimized function with those args]
+          opt = max(time.perf_counter() - start, 1e-9)
+          print(f"{{N}},{{orig:.6f}},{{opt:.6f}},{{orig/opt:.4f}}")
+      except Exception as e:
+          print(f"{N},0.0,0.0,0.0")
 """,
     ModelTier.MEDIUM: """
 REMINDERS:
