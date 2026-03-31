@@ -99,6 +99,8 @@ def _run_single_agent(
     is_valid      = _check_speedup_success(success, logs)
 
     while not is_valid and retry_count < max_retries:
+        if getattr(sandbox, 'disabled', False):
+            break
         if success:
             if "N,Original_Time" not in logs:
                 logs += "\nERROR: Script ran but DID NOT print the CSV table. You MUST print the strict CSV format."
@@ -153,7 +155,10 @@ def _run_multi_agent(
     # Attach generated code to result dict so downstream code can read it
     result["optimized_code"] = optimized_code
 
-    # Step 3: harness + test cases in parallel
+    # Step 3: harness + test cases in parallel (skip harness if Docker disabled)
+    if getattr(sandbox, 'disabled', False):
+        return result, optimized_code, False, "Verification skipped (--no-docker).", None, False
+
     with _cf.ThreadPoolExecutor(max_workers=2) as _pool:
         harness_future = _pool.submit(
             multi_agents["harness"].run,
@@ -470,7 +475,7 @@ def print_console_report(func_name: str, result: dict, sandbox_res: tuple, msg: 
 
     console.print(Panel(Group(*content), title=f"🚀 Analysis: [bold]{func_name}[/bold]", border_style=color))
 
-def _preflight_checks(provider: str, model_name: str) -> bool:
+def _preflight_checks(provider: str, model_name: str, no_docker: bool = False) -> bool:
     """
     Fast, cheap checks run before any expensive work (parsing, image building, threads).
     Prints an actionable Rich panel and returns False on failure.
@@ -478,22 +483,26 @@ def _preflight_checks(provider: str, model_name: str) -> bool:
     import docker as _docker
 
     # ── 1. Docker ────────────────────────────────────────────────────────────
-    try:
-        _docker.from_env().ping()
-    except _docker.errors.DockerException as e:
-        console.print(Panel(
-            "[bold]CoreInsight requires Docker to run its verification sandboxes.[/bold]\n\n"
-            "[yellow]To fix:[/yellow]\n"
-            "  • [cyan]Mac / Windows[/cyan] — Open Docker Desktop and wait for the whale icon to stop animating\n"
-            "  • [cyan]Linux[/cyan]          — Run: [cyan]sudo systemctl start docker[/cyan]\n\n"
-            f"[dim]Docker error: {e}[/dim]",
-            title="❌  Docker is not running",
-            border_style="red",
-        ))
-        return False
-    except Exception as e:
-        console.print(f"[red]Unexpected error reaching Docker: {e}[/red]")
-        return False
+    if no_docker:
+        console.print("[yellow]⚠  --no-docker: sandbox disabled — benchmarking and verification will be skipped.[/yellow]")
+    else:
+        try:
+            _docker.from_env().ping()
+        except _docker.errors.DockerException as e:
+            console.print(Panel(
+                "[bold]CoreInsight requires Docker to run its verification sandboxes.[/bold]\n\n"
+                "[yellow]To fix:[/yellow]\n"
+                "  • [cyan]Mac / Windows[/cyan] — Open Docker Desktop and wait for the whale icon to stop animating\n"
+                "  • [cyan]Linux[/cyan]         — Run: [cyan]sudo systemctl start docker[/cyan]\n\n"
+                "[dim]No Docker? Run with [cyan]--no-docker[/cyan] to skip sandboxing entirely.[/dim]\n\n"
+                f"[dim]Docker error: {e}[/dim]",
+                title="❌  Docker is not running",
+                border_style="red",
+            ))
+            return False
+        except Exception as e:
+            console.print(f"[red]Unexpected error reaching Docker: {e}[/red]")
+            return False
 
     # ── 2. Ollama (only when provider == "ollama") ────────────────────────────
     if provider == "ollama":
@@ -532,7 +541,7 @@ def _preflight_checks(provider: str, model_name: str) -> bool:
 
     return True
 
-def run_analysis(file_path: str):
+def run_analysis(file_path: str, no_docker: bool = False):
     path = Path(file_path)
     if not path.exists() or not path.is_file():
         console.print(f"[red]Error: File '{file_path}' not found.[/red]")
@@ -551,7 +560,7 @@ def run_analysis(file_path: str):
     pro_user = is_pro(config)
 
     # ── Preflight: fail fast before AST parsing, image building, or thread spawning ──
-    if not _preflight_checks(provider, model_name):
+    if not _preflight_checks(provider, model_name, no_docker=no_docker):
         sys.exit(1)
 
     tier_label = "[bold green]Pro[/bold green]" if pro_user else "[bold yellow]Free[/bold yellow]"
@@ -587,7 +596,7 @@ def run_analysis(file_path: str):
 
         model_tier = get_model_tier(provider, model_name)
         agent      = AnalyzerAgent(provider=provider, model_name=model_name, api_keys=api_keys, model_tier=model_tier)
-        sandbox    = CodeSandbox()
+        sandbox    = CodeSandbox(disabled=no_docker)
         db_path    = path.parent / ".coreinsight_db"
         indexer    = RepoIndexer(str(path.parent)) if db_path.exists() else None
         profiler   = HardwareProfiler() if pro_user else None
@@ -695,7 +704,7 @@ def run_analysis(file_path: str):
             border_style="yellow",
         ))
 
-def run_demo(lang: str = "python"):
+def run_demo(lang: str = "python", no_docker: bool = False):
     import shutil
     import importlib.resources
 
@@ -762,7 +771,7 @@ def run_demo(lang: str = "python"):
         _RepoIndexer(str(demo_dir)).index_repository()
         console.print()
 
-    run_analysis(str(demo_dir / entry_file))
+    run_analysis(str(demo_dir / entry_file), no_docker=no_docker)
 
 def _run_memory_cmd(clear: bool):
     from coreinsight.memory import OptimizationMemory, MEMORY_DIR
@@ -879,9 +888,13 @@ def main_cli():
         default="python",
         help="Language of the demo file (default: python)",
     )
+    demo_parser.add_argument("--no-docker", dest="no_docker", action="store_true",
+                             help="Skip Docker sandboxing and verification")
     
     analyze_parser = subparsers.add_parser("analyze", help="Analyze a local code file")
     analyze_parser.add_argument("file", help="The .cpp, .cu, or .py file to analyze")
+    analyze_parser.add_argument("--no-docker", dest="no_docker", action="store_true",
+                                help="Skip Docker sandboxing and verification (useful if Docker is not installed)")
     
     index_parser = subparsers.add_parser("index", help="Index the current repository for global AI context")
     index_parser.add_argument("--dir", default=".", help="Directory to index")
@@ -901,9 +914,9 @@ def main_cli():
             agent_mode=getattr(args, "agent_mode", None),
         )
     elif args.command == "demo":
-        run_demo(getattr(args, "lang", "python"))
+        run_demo(getattr(args, "lang", "python"), no_docker=getattr(args, "no_docker", False))
     elif args.command == "analyze":
-        run_analysis(args.file)
+        run_analysis(args.file, no_docker=getattr(args, "no_docker", False))
     elif args.command == "memory":
         _run_memory_cmd(getattr(args, "clear", False))
     elif args.command == "scan":

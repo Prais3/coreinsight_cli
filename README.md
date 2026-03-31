@@ -241,3 +241,10 @@ CoreInsight is local-first by design:
   analyse is sent to the provider's API, under your own key
 - The optimization memory store lives at `~/.coreinsight/memory_db` on
   your local filesystem
+
+## Troubleshooting
+
+ChromaDB issue with old SQLite3 versions. To resolve:
+```bash
+pip install pysqlite3-binary # >=0.5.0
+```
