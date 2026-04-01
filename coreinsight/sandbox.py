@@ -26,6 +26,7 @@ DOCKERFILES = {
 # ---------------------------------------------------------------------------
 # Verification constants
 # ---------------------------------------------------------------------------
+SANDBOX_SKIPPED_MSG = "Verification skipped (--no-docker)."
 SPEEDUP_DISCREPANCY_TOLERANCE = 0.05  # max relative delta: computed vs reported speedup
 MIN_TIMING_ROWS = 2                   # minimum CSV rows to trust timing statistics
 FLOAT_RTOL = 1e-5                     # relative tolerance for output comparison
@@ -148,7 +149,12 @@ class VerificationResult:
 
 
 class CodeSandbox:
-    def __init__(self):
+    def __init__(self, disabled: bool = False):
+        self.disabled = disabled
+        if disabled:
+            self.client = None
+            self._init_error = None
+            return
         self._init_error: Optional[str] = None
         try:
             self.client = docker.from_env()
@@ -197,6 +203,8 @@ class CodeSandbox:
         console.print(f"[green]✓ {label} sandbox image built successfully.[/green]")
 
     def execute_benchmark(self, code: str, language: str = "cpp", timeout_seconds: int = 120) -> Tuple[bool, str, Optional[bytes]]:
+        if self.disabled:
+            return False, SANDBOX_SKIPPED_MSG, None
         if not self.client:
             return False, "Docker is not running on the host machine.", None
 
@@ -283,6 +291,11 @@ class CodeSandbox:
         language: str = "python",
         timeout_seconds: int = 60,
     ) -> VerificationResult:
+        if self.disabled:
+            return VerificationResult(
+                speedup=SpeedupVerification(verified=False, details=SANDBOX_SKIPPED_MSG),
+                correctness=CorrectnessVerification(verified=False, details=SANDBOX_SKIPPED_MSG),
+            )
         speedup_result     = self._verify_speedup(csv_output)
         correctness_result = self._verify_correctness(
             original_code, optimized_code,

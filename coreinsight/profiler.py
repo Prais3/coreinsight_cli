@@ -135,6 +135,10 @@ for _ in range({n_iter}):
 '''.strip()
 
 
+# Minimal C++ wrapper — compiles the full source file and runs it under perf stat.
+# The source file must be compilable as a standalone program (has a main or we inject one).
+_CPP_PERF_COMPILE_CMD = "g++ -O3 -std=c++17 {src} -o {out}"
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
@@ -271,7 +275,14 @@ class HardwareProfiler:
                     source_dir=source_dir,
                 )
             if language in ("cpp", "c++"):
-                return self._profile_cpp(detected)
+                return self._profile_cpp(
+                    detected,
+                    original_code=original_code,
+                    optimized_code=optimized_code,
+                    func_name=func_name,
+                    original_file_content=original_file_content,
+                    source_dir=source_dir,
+                )
             if language in ("cuda", "cu", "cuh"):
                 return self._profile_cuda(detected)
         except Exception as exc:
@@ -520,16 +531,183 @@ class HardwareProfiler:
         return metrics or None
 
     # ------------------------------------------------------------------ #
-    # C++ path (v0.2.0: valgrind callgrind)
+    # C++ path — perf stat on host (v0.2.1)
     # ------------------------------------------------------------------ #
 
-    def _profile_cpp(self, detected: Dict[str, bool]) -> ProfilerResult:
-        found = [k for k, v in detected.items() if v]
-        note  = f"Detected: {', '.join(found)}." if found else "No C++ profiling tools found."
-        return ProfilerResult(
-            available=False, tool="none", language="cpp",
-            error=f"{note} Full C++ profiling (perf stat + valgrind) coming in v0.2.0.",
+    def _profile_cpp(
+        self,
+        detected:              Dict[str, bool],
+        original_code:         str = "",
+        optimized_code:        str = "",
+        func_name:             str = "",
+        original_file_content: str = "",
+        source_dir:            str = "",
+        n_iter:                int = 1,
+    ) -> ProfilerResult:
+        result = ProfilerResult(available=False, tool="perf stat", language="cpp")
+
+        has_perf = detected.get("perf", False)
+        has_gpp  = shutil.which("g++") is not None
+
+        if not has_perf:
+            result.error = (
+                "perf not found on host (Linux only). "
+                "Install via: sudo apt install linux-perf"
+            )
+            return result
+        if not has_gpp:
+            result.error = "g++ not found on host — required to compile for perf stat."
+            return result
+        if not original_file_content:
+            result.error = "No source file content available for C++ profiling."
+            return result
+
+        host_metrics = self._run_perf_stat_cpp(
+            original_file_content, optimized_code, func_name, n_iter
         )
+        if host_metrics is None:
+            result.error = (
+                "perf stat produced no counters — check kernel.perf_event_paranoid "
+                "(sudo sysctl kernel.perf_event_paranoid=1) or compilation errors."
+            )
+            return result
+
+        result.available        = True
+        result.host_tool_name   = "perf stat"
+        result.host_tool_metrics = host_metrics
+        return result
+
+    def _substitute_cpp_function(
+        self, source: str, func_name: str, new_body: str
+    ) -> Optional[str]:
+        """
+        Best-effort substitution of a C++ function by name.
+        Finds the first occurrence of `func_name` followed by a parameter list
+        and replaces the entire brace-delimited body.  Returns None on failure.
+        """
+        # Find the function signature line
+        sig_pattern = re.compile(
+            r"[^\n]*\b" + re.escape(func_name) + r"\s*\([^)]*\)[^\{]*\{",
+            re.DOTALL,
+        )
+        m = sig_pattern.search(source)
+        if not m:
+            return None
+
+        # Walk forward to find the matching closing brace
+        start = m.start()
+        brace_start = source.index("{", m.start())
+        depth, i = 0, brace_start
+        while i < len(source):
+            if source[i] == "{":
+                depth += 1
+            elif source[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        if depth != 0:
+            return None
+
+        # Replace everything from the signature start to the closing brace
+        replacement = source[start : brace_start + 1] + "\n" + new_body.strip() + "\n}"
+        return source[:start] + replacement + source[i + 1:]
+
+    def _run_perf_stat_cpp(
+        self,
+        original_file_content: str,
+        optimized_code:        str,
+        func_name:             str,
+        n_iter:                int,
+    ) -> Optional[List[ProfilerMetric]]:
+        events = "cache-misses,cache-references,instructions,cycles,branch-misses"
+        counters_per_label: Dict[str, Dict[str, float]] = {}
+
+        # Build optimized source — substitute function if we can, else skip opt run
+        opt_source = None
+        if optimized_code and func_name:
+            opt_source = self._substitute_cpp_function(
+                original_file_content, func_name, optimized_code
+            )
+
+        sources = [("original", original_file_content)]
+        if opt_source:
+            sources.append(("optimized", opt_source))
+
+        tmp = tempfile.mkdtemp()
+        try:
+            for label, src in sources:
+                src_path = os.path.join(tmp, f"{label}.cpp")
+                bin_path = os.path.join(tmp, label)
+                with open(src_path, "w") as fh:
+                    fh.write(src)
+
+                # Compile
+                compile_proc = subprocess.run(
+                    ["g++", "-O3", "-std=c++17", src_path, "-o", bin_path],
+                    capture_output=True, text=True, timeout=60,
+                )
+                if compile_proc.returncode != 0:
+                    logger.debug(
+                        f"C++ perf: compile failed for {label}:\n"
+                        f"{compile_proc.stderr[:400]}"
+                    )
+                    return None
+
+                # Run under perf stat
+                try:
+                    perf_proc = subprocess.run(
+                        ["perf", "stat", "-e", events, bin_path],
+                        capture_output=True, text=True, timeout=120,
+                    )
+                    parsed = _parse_perf_stat(perf_proc.stderr)
+                    if not parsed:
+                        logger.debug(
+                            f"C++ perf: no counters for {label}. "
+                            f"stderr: {perf_proc.stderr[:200]}"
+                        )
+                        return None
+                    counters_per_label[label] = parsed
+                except subprocess.TimeoutExpired:
+                    logger.debug("C++ perf stat timed out.")
+                    return None
+                except PermissionError:
+                    logger.debug("C++ perf stat: permission denied.")
+                    return None
+
+        except Exception as exc:
+            logger.debug(f"C++ perf stat error: {exc}")
+            return None
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        if "original" not in counters_per_label:
+            return None
+
+        orig_c = counters_per_label["original"]
+        # If substitution failed we only have original — report as baseline only
+        opt_c  = counters_per_label.get("optimized", orig_c)
+
+        display_map = [
+            ("cache_misses",  "Cache misses",  "lower is better"),
+            ("cache_refs",    "Cache refs",    ""),
+            ("instructions",  "Instructions",  "lower is better"),
+            ("cycles",        "CPU cycles",    "lower is better"),
+            ("branch_misses", "Branch misses", "lower is better"),
+        ]
+        metrics: List[ProfilerMetric] = []
+        for key, display, note in display_map:
+            if key in orig_c:
+                ov  = orig_c[key]
+                opv = opt_c.get(key, ov)
+                metrics.append(ProfilerMetric(
+                    name=display,
+                    original=f"{ov:,.0f}",
+                    optimized=f"{opv:,.0f}",
+                    delta=_pct_delta(ov, opv) if opv != ov else "—",
+                    note=note,
+                ))
+        return metrics or None
 
     # ------------------------------------------------------------------ #
     # CUDA path (v0.2.0: nsys / nvprof)

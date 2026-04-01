@@ -14,6 +14,35 @@ from langchain_anthropic import ChatAnthropic
 
 from coreinsight.prompts import SYSTEM_PROMPT, ANALYSIS_TEMPLATE, HARNESS_ADDENDUM
 
+# Phrases that appear at the start of a truncated LLM response
+_TRUNCATION_HINTS = (
+    "context length",
+    "context_length_exceeded",
+    "maximum context",
+    "token limit",
+    "finish_reason: length",
+    "finish_reason\":\"length",
+)
+
+def _is_truncated(raw: str) -> bool:
+    """
+    Returns True if the raw LLM output looks like it was cut off mid-generation.
+    Catches both explicit error messages and structural truncation signs.
+    """
+    if not raw or len(raw.strip()) < 20:
+        return True
+    low = raw.lower()
+    if any(hint in low for hint in _TRUNCATION_HINTS):
+        return True
+    stripped = raw.strip()
+    # JSON truncation: opened but never closed
+    if stripped.startswith("{") and not stripped.endswith("}"):
+        return True
+    # Code truncation: opens a block but ends mid-statement
+    if stripped.endswith(("...", "/*", "//", "\"", "'")):
+        return True
+    return False
+
 logger = logging.getLogger(__name__)
 
 
@@ -163,12 +192,15 @@ class AnalyzerAgent:
             self.json_llm = self.base_llm
 
         elif provider == "local_server":
-            base_url = api_keys.get("local_url", "http://localhost:1234/v1")
+            from coreinsight.prompts import ModelTier
+            base_url   = api_keys.get("local_url", "http://localhost:1234/v1")
+            _max_tokens = 2048 if model_tier == ModelTier.SMALL else 4096
             self.base_llm = ChatOpenAI(
                 model=model_name,
                 api_key="not-needed",
                 base_url=base_url,
                 temperature=0.1,
+                max_tokens=_max_tokens,
                 model_kwargs={"response_format": {"type": "json_object"}},
             )
             self.json_llm = self.base_llm
@@ -196,11 +228,20 @@ class AnalyzerAgent:
             self.json_llm = self.base_llm
 
         else:  # Ollama default
+            from coreinsight.prompts import ModelTier
+            # Small models (7B) typically have 4096 native context.
+            # Asking for more causes silent degradation or OOM on the host.
+            # Medium/large local models can handle 8192 comfortably.
+            _ctx = 4096 if model_tier == ModelTier.SMALL else 8192
+            # num_predict: small models need room for JSON + code in one shot.
+            # Capping at 2048 for small prevents runaway generation that hits
+            # the limit mid-JSON and returns truncated garbage.
+            _predict = 2048 if model_tier == ModelTier.SMALL else 4096
             self.base_llm = ChatOllama(
                 model=model_name,
                 temperature=0.1,
-                num_predict=4096,
-                num_ctx=8192,
+                num_predict=_predict,
+                num_ctx=_ctx,
             )
             self.json_llm = self.base_llm.bind(format="json")
 
@@ -258,13 +299,30 @@ class AnalyzerAgent:
     def _invoke_code_chain(self, template: str, variables: dict, language: str) -> str:
         """Shared invocation + extraction logic for harness and fix chains."""
         chain = PromptTemplate.from_template(template) | self.base_llm
-        result = chain.invoke(variables)
+        try:
+            result = chain.invoke(variables)
+        except Exception as e:
+            err = str(e).lower()
+            if any(h in err for h in _TRUNCATION_HINTS):
+                raise RuntimeError(
+                    f"Model hit its context limit. Try a smaller file, fewer functions, "
+                    f"or a model with a larger context window. Detail: {e}"
+                ) from e
+            raise
         raw = result.content if hasattr(result, "content") else str(result)
-        # Handle Anthropic returning a list of content blocks
         if isinstance(raw, list):
             raw = "\n".join(
                 item["text"] if isinstance(item, dict) and "text" in item else str(item)
                 for item in raw
+            )
+        if _is_truncated(raw):
+            logger.warning(
+                f"LLM output appears truncated (len={len(raw)}). "
+                f"Model likely hit its context/predict limit."
+            )
+            raise RuntimeError(
+                "Model output was truncated — hit context or token limit. "
+                "Try a model with a larger context window, or reduce the function size."
             )
         return self._extract_executable_code(raw)
 
@@ -395,4 +453,438 @@ class AnalyzerAgent:
 
         except Exception as e:
             logger.warning(f"generate_test_cases failed for '{func_name}': {e}")
+            return []
+        
+# ---------------------------------------------------------------------------
+# Multi-agent support (v0.2.5)
+# ---------------------------------------------------------------------------
+
+def _build_llm(provider: str, model_name: str, api_keys: dict):
+    """
+    Shared LLM factory for all multi-agent classes.
+    Returns (base_llm, json_llm) — same pattern as AnalyzerAgent.__init__.
+    Raises ValueError on missing credentials.
+    """
+    api_keys = api_keys or {}
+
+    if provider == "openai":
+        if not api_keys.get("openai"):
+            raise ValueError("OpenAI API key required.")
+        llm = ChatOpenAI(
+            model=model_name,
+            api_key=api_keys["openai"],
+            temperature=0.1,
+            model_kwargs={"response_format": {"type": "json_object"}},
+        )
+        return llm, llm
+
+    if provider == "local_server":
+        base_url    = api_keys.get("local_url", "http://localhost:1234/v1")
+        _max_tokens = api_keys.pop("_predict", 4096)  # reuse same key as Ollama path
+        llm = ChatOpenAI(
+            model=model_name,
+            api_key="not-needed",
+            base_url=base_url,
+            temperature=0.1,
+            max_tokens=_max_tokens,
+            model_kwargs={"response_format": {"type": "json_object"}},
+        )
+        return llm, llm
+
+    if provider == "anthropic":
+        if not api_keys.get("anthropic"):
+            raise ValueError("Anthropic API key required.")
+        llm = ChatAnthropic(
+            model=model_name,
+            api_key=api_keys["anthropic"],
+            temperature=0.1,
+        )
+        return llm, llm
+
+    if provider == "google":
+        if not api_keys.get("google"):
+            raise ValueError("Google Gemini API key required.")
+        llm = ChatGoogleGenerativeAI(
+            model=model_name,
+            google_api_key=api_keys["google"],
+            temperature=0.1,
+            convert_system_message_to_human=True,
+        )
+        return llm, llm
+
+    # Ollama default — context and predict budget are passed in from the
+    # calling agent which knows its own model_tier.
+    # Default to medium-safe values; callers override via kwargs if needed.
+    _ctx     = api_keys.pop("_ctx",     8192)
+    _predict = api_keys.pop("_predict", 4096)
+    base = ChatOllama(
+        model=model_name,
+        temperature=0.1,
+        num_predict=_predict,
+        num_ctx=_ctx,
+    )
+    return base, base.bind(format="json")
+
+
+def _build_llm_tiered(provider: str, model_name: str, api_keys: dict, model_tier: str):
+    """Wraps _build_llm with tier-aware context settings for local providers."""
+    from coreinsight.prompts import ModelTier
+    keys = dict(api_keys or {})
+    if provider == "ollama":
+        keys["_ctx"]     = 4096 if model_tier == ModelTier.SMALL else 8192
+        keys["_predict"] = 2048 if model_tier == ModelTier.SMALL else 4096
+    elif provider == "local_server":
+        # max_tokens controls response length — context window is server-side
+        keys["_predict"] = 2048 if model_tier == ModelTier.SMALL else 4096
+    return _build_llm(provider, model_name, keys)
+
+
+class BottleneckAgent:
+    """
+    Agent 1 — analysis only.
+    Identifies the single most critical bottleneck and returns the same
+    dict structure as AnalyzerAgent.analyze() so process_function cannot
+    tell the difference.  optimized_code is always None from this agent.
+    """
+
+    def __init__(
+        self,
+        provider:   str,
+        model_name: str,
+        api_keys:   dict,
+        model_tier: str,
+    ) -> None:
+        from coreinsight.prompts import BOTTLENECK_TEMPLATE, SYSTEM_PROMPT
+        self.model_tier = model_tier
+        self.parser     = JsonOutputParser(pydantic_object=AuditResult)
+        self._base_llm, self._json_llm = _build_llm_tiered(provider, model_name, api_keys, model_tier)
+
+        self._prompt = PromptTemplate(
+            template=BOTTLENECK_TEMPLATE,
+            input_variables=[
+                "language", "code_content", "context", "hardware_target",
+            ],
+            partial_variables={
+                "system_prompt":      SYSTEM_PROMPT,
+                "format_instructions": self.parser.get_format_instructions(),
+            },
+        )
+        self._chain = self._prompt | self._json_llm | self.parser
+
+    def analyze(
+        self,
+        code:            str,
+        language:        str,
+        context:         str = "",
+        hardware_target: str = "Generic CPU",
+    ) -> dict:
+        try:
+            return self._chain.invoke({
+                "language":        language,
+                "code_content":    code,
+                "context":         context,
+                "hardware_target": hardware_target,
+            })
+        except OutputParserException:
+            return {
+                "severity":       "Error",
+                "issue":          "AI Output Parsing Failed",
+                "reasoning":      "The model failed to return valid JSON.",
+                "suggestion":     "Try running again or use a larger model.",
+                "bottlenecks":    [],
+                "optimized_code": None,
+            }
+        except Exception as e:
+            return {
+                "severity":       "Error",
+                "issue":          str(e),
+                "reasoning":      "System error during bottleneck analysis.",
+                "suggestion":     "Check LLM API keys and connectivity.",
+                "bottlenecks":    [],
+                "optimized_code": None,
+            }
+
+
+class OptimizerAgent:
+    """
+    Agent 2 — code generation only.
+    Receives the bottleneck analysis result and writes the optimized function.
+    Returns raw code as a string (no JSON, no harness).
+    """
+
+    def __init__(
+        self,
+        provider:   str,
+        model_name: str,
+        api_keys:   dict,
+        model_tier: str,
+    ) -> None:
+        from coreinsight.prompts import OPTIMIZER_TEMPLATE
+        self.model_tier = model_tier
+        self._base_llm, _ = _build_llm_tiered(provider, model_name, api_keys, model_tier)
+        self._template = OPTIMIZER_TEMPLATE
+
+    def _extract_code(self, raw: str) -> str:
+        """Reuse the same extraction logic as AnalyzerAgent."""
+        blocks = re.findall(r"```[a-zA-Z+#]*\s*\n(.*?)```", raw, re.DOTALL)
+        if blocks:
+            return max(blocks, key=len).strip()
+        lines = raw.strip().split("\n")
+        lines = [l for l in lines if not re.match(r"^```", l)]
+        while lines and lines[0].lower().startswith(
+            ("here is", "sure", "certainly", "output:")
+        ) and not lines[0].strip().startswith(("#", "//")):
+            lines.pop(0)
+        return "\n".join(lines).strip()
+
+    def generate(
+        self,
+        func_name:       str,
+        original_code:   str,
+        analysis:        dict,
+        language:        str,
+        context:         str = "",
+        hardware_target: str = "Generic CPU",
+    ) -> str:
+        """
+        Returns the optimized function as a raw code string.
+        Returns original_code on any failure so the pipeline can continue.
+        """
+        try:
+            chain  = PromptTemplate.from_template(self._template) | self._base_llm
+            result = chain.invoke({
+                "language":        language,
+                "func_name":       func_name,
+                "hardware_target": hardware_target,
+                "severity":        analysis.get("severity",  ""),
+                "issue":           analysis.get("issue",     ""),
+                "reasoning":       analysis.get("reasoning", ""),
+                "suggestion":      analysis.get("suggestion",""),
+                "original":        original_code,
+                "context":         context or "None",
+            })
+            raw = result.content if hasattr(result, "content") else str(result)
+            if isinstance(raw, list):
+                raw = "\n".join(
+                    item["text"] if isinstance(item, dict) and "text" in item
+                    else str(item)
+                    for item in raw
+                )
+            code = self._extract_code(raw)
+            return code if code else original_code
+        except Exception as e:
+            logger.warning(f"OptimizerAgent.generate failed: {e}")
+            return original_code
+
+
+class HarnessAgent:
+    """
+    Agent 3 — harness generation and fix loop.
+    Owns the entire retry loop so process_function stays clean.
+    Returns (harness_code, success, logs, plot_data) after running in sandbox.
+    """
+
+    def __init__(
+        self,
+        provider:   str,
+        model_name: str,
+        api_keys:   dict,
+        model_tier: str,
+    ) -> None:
+        from coreinsight.prompts import (
+            HARNESS_TEMPLATE_MULTI,
+            FIX_TEMPLATE_MULTI,
+            HARNESS_ADDENDUM_MULTI,
+        )
+        self.model_tier      = model_tier
+        self._base_llm, _    = _build_llm_tiered(provider, model_name, api_keys, model_tier)
+        self._harness_tmpl   = HARNESS_TEMPLATE_MULTI + HARNESS_ADDENDUM_MULTI.get(model_tier, "")
+        self._fix_tmpl       = FIX_TEMPLATE_MULTI     + HARNESS_ADDENDUM_MULTI.get(model_tier, "")
+
+    def _extract_code(self, raw: str) -> str:
+        blocks = re.findall(r"```[a-zA-Z+#]*\s*\n(.*?)```", raw, re.DOTALL)
+        if blocks:
+            return max(blocks, key=len).strip()
+        lines = raw.strip().split("\n")
+        lines = [l for l in lines if not re.match(r"^```", l)]
+        while lines and lines[0].lower().startswith(
+            ("here is", "sure", "certainly", "output:")
+        ) and not lines[0].strip().startswith(("#", "//")):
+            lines.pop(0)
+        return "\n".join(lines).strip()
+
+    def _invoke(self, template: str, variables: dict) -> str:
+        chain  = PromptTemplate.from_template(template) | self._base_llm
+        try:
+            result = chain.invoke(variables)
+        except Exception as e:
+            err = str(e).lower()
+            if any(h in err for h in _TRUNCATION_HINTS):
+                raise RuntimeError(
+                    f"Model hit its context limit during harness generation. "
+                    f"Detail: {e}"
+                ) from e
+            raise
+        raw = result.content if hasattr(result, "content") else str(result)
+        if isinstance(raw, list):
+            raw = "\n".join(
+                item["text"] if isinstance(item, dict) and "text" in item
+                else str(item)
+                for item in raw
+            )
+        if _is_truncated(raw):
+            raise RuntimeError(
+                "Harness output was truncated — model hit its token limit. "
+                "Switching to fix loop with truncation note."
+            )
+        return self._extract_code(raw)
+
+    def _check_speedup(self, success: bool, logs: str) -> bool:
+        if not success:
+            return False
+        try:
+            for line in reversed(logs.strip().split("\n")):
+                parts = line.split(",")
+                if len(parts) == 4 and parts[0].strip().isdigit():
+                    return float(parts[3]) >= 1.05
+        except Exception:
+            pass
+        return False
+
+    def run(
+        self,
+        func_name:       str,
+        original_code:   str,
+        optimized_code:  str,
+        language:        str,
+        context:         str,
+        hardware_target: str,
+        sandbox,                    # CodeSandbox instance
+        max_retries:     int = 2,
+    ) -> tuple:
+        """
+        Generates harness, runs in sandbox, retries on failure.
+        Returns (success, logs, plot_data, retry_count).
+        """
+        try:
+            harness = self._invoke(self._harness_tmpl, {
+                "language":        language,
+                "func_name":       func_name,
+                "original":        original_code,
+                "optimized":       optimized_code,
+                "context":         context,
+                "hardware_target": hardware_target,
+            })
+        except Exception as e:
+            return False, f"Harness generation failed: {e}", None, 0
+
+        success, logs, plot_data = sandbox.execute_benchmark(harness, language)
+        is_valid  = self._check_speedup(success, logs)
+        retries   = 0
+
+        while not is_valid and retries < max_retries:
+            if success and "N,Original_Time" not in logs:
+                logs += "\nERROR: Script ran but did NOT print the CSV table. You MUST print the strict CSV format."
+            elif success:
+                logs += "\nERROR: Optimized code was SLOWER than original. Rewrite to be faster."
+
+            try:
+                harness = self._invoke(self._fix_tmpl, {
+                    "language":   language,
+                    "func_name":  func_name,
+                    "original":   original_code,
+                    "bad_harness":harness,
+                    "error_logs": logs,
+                    "context":    context,
+                })
+            except Exception as e:
+                logs += f"\nFix generation failed: {e}"
+                break
+
+            success, logs, plot_data = sandbox.execute_benchmark(harness, language)
+            is_valid = self._check_speedup(success, logs)
+            retries += 1
+
+        if is_valid and retries > 0:
+            logs = f"(Succeeded after {retries} retries)\n" + logs
+        elif not is_valid:
+            logs    = f"(Failed after {retries} retries)\n" + logs
+            success = False
+
+        return success, logs, plot_data, retries
+
+
+class TestCaseAgent:
+    """
+    Agent 4 — test case generation only.
+    Identical logic to AnalyzerAgent.generate_test_cases but as a
+    standalone class so it can be called from a separate thread.
+    """
+
+    def __init__(
+        self,
+        provider:   str,
+        model_name: str,
+        api_keys:   dict,
+        model_tier: str,
+    ) -> None:
+        self.model_tier   = model_tier
+        self._base_llm, _ = _build_llm_tiered(provider, model_name, api_keys, model_tier)
+
+    def generate(
+        self,
+        func_name:     str,
+        original_code: str,
+        language:      str,
+        context:       str = "",
+        num_cases:     int = 8,
+    ) -> list:
+        """
+        Same return contract as AnalyzerAgent.generate_test_cases:
+        list of {"args": [...], "kwargs": {...}} or [] on failure.
+        """
+        import json as _json
+
+        chain = PromptTemplate.from_template(_TEST_CASES_TEMPLATE) | self._base_llm
+        try:
+            result = chain.invoke({
+                "func_name": func_name,
+                "language":  language,
+                "original":  original_code,
+                "context":   context or "None",
+                "num_cases": num_cases,
+            })
+            raw = result.content if hasattr(result, "content") else str(result)
+            if isinstance(raw, list):
+                raw = "\n".join(
+                    item["text"] if isinstance(item, dict) and "text" in item
+                    else str(item)
+                    for item in raw
+                )
+
+            raw = re.sub(r"```[a-zA-Z]*\s*", "", raw).strip()
+            raw = re.sub(r"```",              "", raw).strip()
+            raw = re.sub(r"\bNone\b",  "null",  raw)
+            raw = re.sub(r"\bTrue\b",  "true",  raw)
+            raw = re.sub(r"\bFalse\b", "false", raw)
+            raw = re.sub(r",\s*([\]}])", r"\1", raw)
+
+            match = re.search(r"\[.*\]", raw, re.DOTALL)
+            if match:
+                raw = match.group(0)
+
+            try:
+                cases = _json.loads(raw)
+            except _json.JSONDecodeError:
+                import ast
+                cases = ast.literal_eval(raw)
+
+            return [
+                c for c in cases
+                if isinstance(c, dict)
+                and isinstance(c.get("args"),   list)
+                and isinstance(c.get("kwargs"), dict)
+            ]
+        except Exception as e:
+            logger.warning(f"TestCaseAgent.generate failed for '{func_name}': {e}")
             return []

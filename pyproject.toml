@@ -4,9 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "coreinsight-cli"
-version = "0.1.6"
+version = "0.2.8"
 description = "Local-first AI performance profiler that mathematically verifies optimizations for Python, C++, and CUDA"
-license = {text = "MIT"}
+license = {text = "GPL-3.0-or-later"}
 authors = [
     {name = "Varun Jani"}
 ]
@@ -14,7 +14,7 @@ keywords = ["performance", "profiling", "optimization", "llm", "cuda", "cpp", "p
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
@@ -38,8 +38,12 @@ dependencies = [
     "pydantic>=2.0",
     "chromadb>=0.5.0",
     "sentence-transformers>=3.0.0",
+    "textual>=0.60.0",
     "psutil>=5.9",
 ]
+
+[project.optional-dependencies]
+compat = ["pysqlite3-binary>=0.5.0"]
 
 [tool.setuptools.packages.find]
 where = ["."]
