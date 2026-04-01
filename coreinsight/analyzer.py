@@ -14,6 +14,35 @@ from langchain_anthropic import ChatAnthropic
 
 from coreinsight.prompts import SYSTEM_PROMPT, ANALYSIS_TEMPLATE, HARNESS_ADDENDUM
 
+# Phrases that appear at the start of a truncated LLM response
+_TRUNCATION_HINTS = (
+    "context length",
+    "context_length_exceeded",
+    "maximum context",
+    "token limit",
+    "finish_reason: length",
+    "finish_reason\":\"length",
+)
+
+def _is_truncated(raw: str) -> bool:
+    """
+    Returns True if the raw LLM output looks like it was cut off mid-generation.
+    Catches both explicit error messages and structural truncation signs.
+    """
+    if not raw or len(raw.strip()) < 20:
+        return True
+    low = raw.lower()
+    if any(hint in low for hint in _TRUNCATION_HINTS):
+        return True
+    stripped = raw.strip()
+    # JSON truncation: opened but never closed
+    if stripped.startswith("{") and not stripped.endswith("}"):
+        return True
+    # Code truncation: opens a block but ends mid-statement
+    if stripped.endswith(("...", "/*", "//", "\"", "'")):
+        return True
+    return False
+
 logger = logging.getLogger(__name__)
 
 
@@ -163,12 +192,15 @@ class AnalyzerAgent:
             self.json_llm = self.base_llm
 
         elif provider == "local_server":
-            base_url = api_keys.get("local_url", "http://localhost:1234/v1")
+            from coreinsight.prompts import ModelTier
+            base_url   = api_keys.get("local_url", "http://localhost:1234/v1")
+            _max_tokens = 2048 if model_tier == ModelTier.SMALL else 4096
             self.base_llm = ChatOpenAI(
                 model=model_name,
                 api_key="not-needed",
                 base_url=base_url,
                 temperature=0.1,
+                max_tokens=_max_tokens,
                 model_kwargs={"response_format": {"type": "json_object"}},
             )
             self.json_llm = self.base_llm
@@ -196,11 +228,20 @@ class AnalyzerAgent:
             self.json_llm = self.base_llm
 
         else:  # Ollama default
+            from coreinsight.prompts import ModelTier
+            # Small models (7B) typically have 4096 native context.
+            # Asking for more causes silent degradation or OOM on the host.
+            # Medium/large local models can handle 8192 comfortably.
+            _ctx = 4096 if model_tier == ModelTier.SMALL else 8192
+            # num_predict: small models need room for JSON + code in one shot.
+            # Capping at 2048 for small prevents runaway generation that hits
+            # the limit mid-JSON and returns truncated garbage.
+            _predict = 2048 if model_tier == ModelTier.SMALL else 4096
             self.base_llm = ChatOllama(
                 model=model_name,
                 temperature=0.1,
-                num_predict=4096,
-                num_ctx=8192,
+                num_predict=_predict,
+                num_ctx=_ctx,
             )
             self.json_llm = self.base_llm.bind(format="json")
 
@@ -258,13 +299,30 @@ class AnalyzerAgent:
     def _invoke_code_chain(self, template: str, variables: dict, language: str) -> str:
         """Shared invocation + extraction logic for harness and fix chains."""
         chain = PromptTemplate.from_template(template) | self.base_llm
-        result = chain.invoke(variables)
+        try:
+            result = chain.invoke(variables)
+        except Exception as e:
+            err = str(e).lower()
+            if any(h in err for h in _TRUNCATION_HINTS):
+                raise RuntimeError(
+                    f"Model hit its context limit. Try a smaller file, fewer functions, "
+                    f"or a model with a larger context window. Detail: {e}"
+                ) from e
+            raise
         raw = result.content if hasattr(result, "content") else str(result)
-        # Handle Anthropic returning a list of content blocks
         if isinstance(raw, list):
             raw = "\n".join(
                 item["text"] if isinstance(item, dict) and "text" in item else str(item)
                 for item in raw
+            )
+        if _is_truncated(raw):
+            logger.warning(
+                f"LLM output appears truncated (len={len(raw)}). "
+                f"Model likely hit its context/predict limit."
+            )
+            raise RuntimeError(
+                "Model output was truncated — hit context or token limit. "
+                "Try a model with a larger context window, or reduce the function size."
             )
         return self._extract_executable_code(raw)
 
@@ -421,12 +479,14 @@ def _build_llm(provider: str, model_name: str, api_keys: dict):
         return llm, llm
 
     if provider == "local_server":
-        base_url = api_keys.get("local_url", "http://localhost:1234/v1")
+        base_url    = api_keys.get("local_url", "http://localhost:1234/v1")
+        _max_tokens = api_keys.pop("_predict", 4096)  # reuse same key as Ollama path
         llm = ChatOpenAI(
             model=model_name,
             api_key="not-needed",
             base_url=base_url,
             temperature=0.1,
+            max_tokens=_max_tokens,
             model_kwargs={"response_format": {"type": "json_object"}},
         )
         return llm, llm
@@ -452,14 +512,31 @@ def _build_llm(provider: str, model_name: str, api_keys: dict):
         )
         return llm, llm
 
-    # Ollama default
+    # Ollama default — context and predict budget are passed in from the
+    # calling agent which knows its own model_tier.
+    # Default to medium-safe values; callers override via kwargs if needed.
+    _ctx     = api_keys.pop("_ctx",     8192)
+    _predict = api_keys.pop("_predict", 4096)
     base = ChatOllama(
         model=model_name,
         temperature=0.1,
-        num_predict=4096,
-        num_ctx=8192,
+        num_predict=_predict,
+        num_ctx=_ctx,
     )
     return base, base.bind(format="json")
+
+
+def _build_llm_tiered(provider: str, model_name: str, api_keys: dict, model_tier: str):
+    """Wraps _build_llm with tier-aware context settings for local providers."""
+    from coreinsight.prompts import ModelTier
+    keys = dict(api_keys or {})
+    if provider == "ollama":
+        keys["_ctx"]     = 4096 if model_tier == ModelTier.SMALL else 8192
+        keys["_predict"] = 2048 if model_tier == ModelTier.SMALL else 4096
+    elif provider == "local_server":
+        # max_tokens controls response length — context window is server-side
+        keys["_predict"] = 2048 if model_tier == ModelTier.SMALL else 4096
+    return _build_llm(provider, model_name, keys)
 
 
 class BottleneckAgent:
@@ -480,7 +557,7 @@ class BottleneckAgent:
         from coreinsight.prompts import BOTTLENECK_TEMPLATE, SYSTEM_PROMPT
         self.model_tier = model_tier
         self.parser     = JsonOutputParser(pydantic_object=AuditResult)
-        self._base_llm, self._json_llm = _build_llm(provider, model_name, api_keys)
+        self._base_llm, self._json_llm = _build_llm_tiered(provider, model_name, api_keys, model_tier)
 
         self._prompt = PromptTemplate(
             template=BOTTLENECK_TEMPLATE,
@@ -544,7 +621,7 @@ class OptimizerAgent:
     ) -> None:
         from coreinsight.prompts import OPTIMIZER_TEMPLATE
         self.model_tier = model_tier
-        self._base_llm, _ = _build_llm(provider, model_name, api_keys)
+        self._base_llm, _ = _build_llm_tiered(provider, model_name, api_keys, model_tier)
         self._template = OPTIMIZER_TEMPLATE
 
     def _extract_code(self, raw: str) -> str:
@@ -620,7 +697,7 @@ class HarnessAgent:
             HARNESS_ADDENDUM_MULTI,
         )
         self.model_tier      = model_tier
-        self._base_llm, _    = _build_llm(provider, model_name, api_keys)
+        self._base_llm, _    = _build_llm_tiered(provider, model_name, api_keys, model_tier)
         self._harness_tmpl   = HARNESS_TEMPLATE_MULTI + HARNESS_ADDENDUM_MULTI.get(model_tier, "")
         self._fix_tmpl       = FIX_TEMPLATE_MULTI     + HARNESS_ADDENDUM_MULTI.get(model_tier, "")
 
@@ -638,13 +715,27 @@ class HarnessAgent:
 
     def _invoke(self, template: str, variables: dict) -> str:
         chain  = PromptTemplate.from_template(template) | self._base_llm
-        result = chain.invoke(variables)
-        raw    = result.content if hasattr(result, "content") else str(result)
+        try:
+            result = chain.invoke(variables)
+        except Exception as e:
+            err = str(e).lower()
+            if any(h in err for h in _TRUNCATION_HINTS):
+                raise RuntimeError(
+                    f"Model hit its context limit during harness generation. "
+                    f"Detail: {e}"
+                ) from e
+            raise
+        raw = result.content if hasattr(result, "content") else str(result)
         if isinstance(raw, list):
             raw = "\n".join(
                 item["text"] if isinstance(item, dict) and "text" in item
                 else str(item)
                 for item in raw
+            )
+        if _is_truncated(raw):
+            raise RuntimeError(
+                "Harness output was truncated — model hit its token limit. "
+                "Switching to fix loop with truncation note."
             )
         return self._extract_code(raw)
 
@@ -738,7 +829,7 @@ class TestCaseAgent:
         model_tier: str,
     ) -> None:
         self.model_tier   = model_tier
-        self._base_llm, _ = _build_llm(provider, model_name, api_keys)
+        self._base_llm, _ = _build_llm_tiered(provider, model_name, api_keys, model_tier)
 
     def generate(
         self,

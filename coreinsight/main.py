@@ -272,8 +272,15 @@ def process_function(func: dict, language: str, agent: AnalyzerAgent, sandbox: C
         return func_name, result, (success, logs, plot_data), None, verification, profiler_result, None, is_valid_optimization
 
     except Exception as e:
+        err_str = str(e)
+        if "context" in err_str.lower() and "limit" in err_str.lower():
+            _log(func_name, f"Context limit hit: {e}", style="bold yellow")
+            return func_name, None, None, (
+                f"⚠️  Context limit: {err_str}\n"
+                f"Try a model with a larger context window, or split the function."
+            ), None, None, None, False
         _log(func_name, f"Failed: {e}", style="bold red")
-        return func_name, None, None, f"❌ Analysis failed: {str(e)}", None, None, None, False
+        return func_name, None, None, f"❌ Analysis failed: {err_str}", None, None, None, False
 
 def parse_csv_logs(logs: str):
     """Safely extracts CSV data from the sandbox logs."""
@@ -803,11 +810,22 @@ def run_demo(lang: str = "python", no_docker: bool = False):
 
     run_analysis(str(demo_dir / entry_file), no_docker=no_docker)
 
-def _run_memory_cmd(clear: bool):
+def _run_memory_cmd(clear: bool, export_path: str = None, export_fmt: str = "csv"):
     from coreinsight.memory import OptimizationMemory, MEMORY_DIR
     import shutil
 
     mem = OptimizationMemory()
+
+    if export_path:
+        count = mem.export(export_path, fmt=export_fmt)
+        if count:
+            console.print(
+                f"[bold green]✅ Exported {count} optimization(s) to "
+                f"[cyan]{export_path}[/cyan][/bold green]"
+            )
+        else:
+            console.print("[yellow]Nothing to export — memory store is empty.[/yellow]")
+        return
 
     if clear:
         if MEMORY_DIR.exists():
@@ -930,7 +948,12 @@ def main_cli():
     index_parser.add_argument("--dir", default=".", help="Directory to index")
     
     memory_parser = subparsers.add_parser("memory", help="Inspect or clear the local optimization memory")
-    memory_parser.add_argument("--clear", action="store_true", help="Wipe the memory store")
+    memory_parser.add_argument("--clear",  action="store_true", help="Wipe the memory store")
+    memory_parser.add_argument("--export", dest="export_path",  default=None,
+                               help="Export memory to file (e.g. --export optimizations.csv)")
+    memory_parser.add_argument("--format", dest="export_fmt",   default="csv",
+                               choices=["csv", "md"],
+                               help="Export format: csv (default) or md")
 
     view_parser = subparsers.add_parser("view", help="Launch the interactive TUI")
     view_parser.add_argument("--dir", default=".", help="Starting directory (default: current)")
@@ -954,7 +977,11 @@ def main_cli():
     elif args.command == "analyze":
         run_analysis(args.file, no_docker=getattr(args, "no_docker", False))
     elif args.command == "memory":
-        _run_memory_cmd(getattr(args, "clear", False))
+        _run_memory_cmd(
+            clear=getattr(args, "clear", False),
+            export_path=getattr(args, "export_path", None),
+            export_fmt=getattr(args, "export_fmt", "csv"),
+        )
     elif args.command == "scan":
         scanner = ProjectScanner(args.dir)
         scanner.scan_project(max_results=args.top)
