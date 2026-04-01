@@ -22,8 +22,10 @@ from textual.widgets import (
     DirectoryTree,
     Footer,
     Header,
+    Input,
     Label,
     RichLog,
+    Select,
     Static,
     Switch,
 )
@@ -253,65 +255,219 @@ class ConfirmModal(ModalScreen[bool]):
 # Settings modal
 # ---------------------------------------------------------------------------
 
-class SettingsModal(ModalScreen):
-    """Read-only settings viewer. Directs user to coreinsight configure for changes."""
+class ConfigureModal(ModalScreen):
+    """Full configure screen — replaces coreinsight configure for TUI users."""
 
-    BINDINGS = [Binding("escape,q", "dismiss", "Close")]
+    BINDINGS = [Binding("escape", "dismiss", "Cancel")]
 
     DEFAULT_CSS = """
-    SettingsModal {
+    ConfigureModal {
         align: center middle;
     }
-    SettingsModal > Container {
-        width: 60;
-        height: 22;
+    ConfigureModal > Container {
+        width: 70;
+        height: 36;
         background: $surface;
         border: thick $primary;
         padding: 1 2;
     }
-    SettingsModal .setting-row {
-        height: 1;
+    ConfigureModal .field-label {
+        color: $text-muted;
+        margin-top: 1;
+    }
+    ConfigureModal Input {
         margin-bottom: 1;
     }
-    SettingsModal #close-settings {
+    ConfigureModal Select {
+        margin-bottom: 1;
+    }
+    ConfigureModal #configure-buttons {
         margin-top: 1;
-        width: 100%;
+        align: center middle;
+    }
+    ConfigureModal Button {
+        margin: 0 1;
+        min-width: 16;
+    }
+    ConfigureModal #configure-status {
+        height: 1;
+        color: $success;
+        margin-top: 1;
     }
     """
 
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._config = load_config()
+
     def compose(self) -> ComposeResult:
-        config    = load_config()
-        pro_user  = is_pro(config)
-        provider  = config.get("provider",   "ollama")
-        model     = config.get("model_name", "llama3.2")
-        tier      = "Pro" if pro_user else "Free"
-        tier_col  = "bold green" if pro_user else "bold yellow"
+        config     = self._config
+        provider   = config.get("provider",   "ollama")
+        model      = config.get("model_name", "llama3.2")
         agent_mode = config.get("agent_mode", "auto")
+        local_url  = config.get("api_keys", {}).get("local_url", "http://localhost:1234/v1")
+        api_keys   = config.get("api_keys", {})
 
         with Container():
-            yield Label("Current Configuration", id="settings-title")
-            yield Static(f"  Tier      : [{tier_col}]{tier}[/{tier_col}]", classes="setting-row")
-            yield Static(f"  Provider  : [cyan]{provider}[/cyan]",          classes="setting-row")
-            yield Static(f"  Model     : [cyan]{model}[/cyan]",              classes="setting-row")
-            yield Static(f"  Agent mode: [cyan]{agent_mode}[/cyan]",         classes="setting-row")
-            yield Static("", classes="setting-row")
-            yield Static(
-                "  To change settings, run:\n"
-                "  [cyan]coreinsight configure[/cyan]",
-                classes="setting-row",
+            yield Label("Configure CoreInsight", id="configure-title")
+
+            yield Label("Provider", classes="field-label")
+            yield Select(
+                [
+                    ("Ollama (local, free)",        "ollama"),
+                    ("Local Server (LM Studio etc)","local_server"),
+                    ("OpenAI",                      "openai"),
+                    ("Anthropic",                   "anthropic"),
+                    ("Google Gemini",               "google"),
+                ],
+                value=provider,
+                id="provider-select",
             )
-            if not pro_user:
-                yield Static(
-                    f"\n  [yellow]Unlock Pro (free during beta):[/yellow]\n"
-                    f"  [cyan underline]{PRO_WAITLIST_URL}[/cyan underline]",
-                    classes="setting-row",
-                )
-            yield Button("Close  [Esc]", id="close-settings", variant="default")
 
-    @on(Button.Pressed, "#close-settings")
-    def close(self) -> None:
+            yield Label("Model name", classes="field-label")
+            yield Input(value=model, placeholder="e.g. llama3.2, gpt-4o, claude-opus-4-5", id="model-input")
+
+            yield Label("Agent mode", classes="field-label")
+            yield Select(
+                [
+                    ("Auto (recommended)", "auto"),
+                    ("Single agent",       "single"),
+                    ("Multi agent",        "multi"),
+                ],
+                value=agent_mode,
+                id="agent-mode-select",
+            )
+
+            # Local server URL — shown only for local_server
+            yield Label("Local server URL", classes="field-label", id="local-url-label")
+            yield Input(
+                value=local_url,
+                placeholder="http://localhost:1234/v1",
+                id="local-url-input",
+            )
+
+            # API key fields — shown per provider
+            yield Label("OpenAI API key", classes="field-label", id="openai-label")
+            yield Input(
+                value=api_keys.get("openai", ""),
+                placeholder="sk-...",
+                password=True,
+                id="openai-input",
+            )
+
+            yield Label("Anthropic API key", classes="field-label", id="anthropic-label")
+            yield Input(
+                value=api_keys.get("anthropic", ""),
+                placeholder="sk-ant-...",
+                password=True,
+                id="anthropic-input",
+            )
+
+            yield Label("Google API key", classes="field-label", id="google-label")
+            yield Input(
+                value=api_keys.get("google", ""),
+                placeholder="AIza...",
+                password=True,
+                id="google-input",
+            )
+
+            yield Label("Pro key", classes="field-label")
+            yield Input(
+                value=config.get("pro_key", ""),
+                placeholder="Your CoreInsight Pro key",
+                password=True,
+                id="pro-key-input",
+            )
+
+            with Horizontal(id="configure-buttons"):
+                yield Button("Save",   id="configure-save",   variant="success")
+                yield Button("Cancel", id="configure-cancel", variant="default")
+
+            yield Label("", id="configure-status")
+
+    def on_mount(self) -> None:
+        self._refresh_visibility(self._config.get("provider", "ollama"))
+
+    @on(Select.Changed, "#provider-select")
+    def provider_changed(self, event: Select.Changed) -> None:
+        self._refresh_visibility(str(event.value))
+
+    def _refresh_visibility(self, provider: str) -> None:
+        """Show only the fields relevant to the selected provider."""
+        local_ids    = ["local-url-label",   "local-url-input"]
+        openai_ids   = ["openai-label",       "openai-input"]
+        anthropic_ids= ["anthropic-label",    "anthropic-input"]
+        google_ids   = ["google-label",       "google-input"]
+
+        all_conditional = local_ids + openai_ids + anthropic_ids + google_ids
+
+        # Hide everything first
+        for wid in all_conditional:
+            try:
+                self.query_one(f"#{wid}").display = False
+            except Exception:
+                pass
+
+        # Show relevant ones
+        show = {
+            "local_server": local_ids,
+            "openai":       openai_ids,
+            "anthropic":    anthropic_ids,
+            "google":       google_ids,
+        }.get(provider, [])
+
+        for wid in show:
+            try:
+                self.query_one(f"#{wid}").display = True
+            except Exception:
+                pass
+
+    @on(Button.Pressed, "#configure-save")
+    def save(self) -> None:
+        import json
+        from pathlib import Path
+
+        provider   = str(self.query_one("#provider-select",   Select).value)
+        model      = self.query_one("#model-input",            Input).value.strip()
+        agent_mode = str(self.query_one("#agent-mode-select",  Select).value)
+        pro_key    = self.query_one("#pro-key-input",          Input).value.strip()
+
+        if not model:
+            self.query_one("#configure-status", Label).update(
+                "[red]Model name cannot be empty.[/red]"
+            )
+            return
+
+        # Build updated config
+        config = dict(self._config)
+        config["provider"]   = provider
+        config["model_name"] = model
+        config["agent_mode"] = agent_mode
+
+        api_keys = dict(config.get("api_keys", {}))
+        api_keys["local_url"]  = self.query_one("#local-url-input",  Input).value.strip()
+        api_keys["openai"]     = self.query_one("#openai-input",     Input).value.strip()
+        api_keys["anthropic"]  = self.query_one("#anthropic-input",  Input).value.strip()
+        api_keys["google"]     = self.query_one("#google-input",     Input).value.strip()
+        config["api_keys"] = api_keys
+
+        if pro_key:
+            config["pro_key"] = pro_key
+
+        config_dir  = Path.home() / ".coreinsight"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        config_path = config_dir / "config.json"
+        with open(config_path, "w") as f:
+            json.dump(config, f, indent=2)
+
+        self.query_one("#configure-status", Label).update(
+            "[green]Saved. Restart coreinsight view to apply changes.[/green]"
+        )
+        self._config = config
+
+    @on(Button.Pressed, "#configure-cancel")
+    def cancel(self) -> None:
         self.dismiss()
-
 
 # ---------------------------------------------------------------------------
 # Main TUI App
@@ -323,12 +479,13 @@ class CoreInsightApp(App):
     CSS_PATH = None   # all CSS inline below
 
     BINDINGS = [
-        Binding("q",     "quit",           "Quit"),
-        Binding("a",     "analyze",        "Analyze"),
-        Binding("i",     "index",          "Index"),
-        Binding("m",     "view_memory",    "Memory"),
-        Binding("s",     "view_settings",  "Settings"),
-        Binding("ctrl+c","quit",           "Quit", show=False),
+        Binding("q",      "quit",           "Quit"),
+        Binding("a",      "analyze",        "Analyze"),
+        Binding("i",      "index",          "Index"),
+        Binding("m",      "view_memory",    "Memory"),
+        Binding("c",      "configure",      "Configure"),
+        Binding("d",      "demo",           "Demo"),
+        Binding("ctrl+c", "quit",           "Quit", show=False),
     ]
 
     CSS = """
@@ -456,10 +613,11 @@ class CoreInsightApp(App):
 
                 with Vertical(id="action-panel"):
                     yield Label("Actions", id="action-label")
-                    yield Button("Analyze [a]",      id="btn-analyze",  variant="success")
-                    yield Button("Index   [i]",      id="btn-index",    variant="primary")
-                    yield Button("Memory  [m]",      id="btn-memory",   variant="default")
-                    yield Button("Settings [s]",     id="btn-settings", variant="default")
+                    yield Button("Analyze   [a]",   id="btn-analyze",   variant="success")
+                    yield Button("Index     [i]",   id="btn-index",     variant="primary")
+                    yield Button("Demo      [d]",   id="btn-demo",      variant="primary")
+                    yield Button("Memory    [m]",   id="btn-memory",    variant="default")
+                    yield Button("Configure [c]",   id="btn-configure", variant="default")
                     with Horizontal(id="no-docker-row"):
                         yield Switch(value=False, id="no-docker-switch")
                         yield Label("Skip Docker", id="no-docker-label")
@@ -562,9 +720,46 @@ class CoreInsightApp(App):
     def action_view_memory(self) -> None:
         self.push_screen(MemoryModal())
 
-    @on(Button.Pressed, "#btn-settings")
-    def action_view_settings(self) -> None:
-        self.push_screen(SettingsModal())
+    @on(Button.Pressed, "#btn-configure")
+    def action_configure(self) -> None:
+        self.push_screen(ConfigureModal())
+        
+    @on(Button.Pressed, "#btn-demo")
+    def action_demo(self) -> None:
+        if self._busy:
+            self._set_status("Already running — please wait.")
+            return
+        no_docker = self.query_one("#no-docker-switch", Switch).value
+        self._start_demo(no_docker)
+
+    @work(thread=True)
+    def _start_demo(self, no_docker: bool) -> None:
+        from coreinsight.main import run_demo
+
+        log = self.query_one("#output-log", RichLog)
+        tui_console = TuiConsole(log)
+        self._busy = True
+
+        self.call_from_thread(self._set_status, "Running demo...")
+        self.call_from_thread(
+            log.write,
+            "\n[bold cyan]Running built-in Python demo...[/bold cyan]\n"
+        )
+
+        # Temporarily patch the demo's console output into the TUI
+        import coreinsight.main as _main
+        _prev = _main.console
+        _main.console = tui_console
+        try:
+            run_demo(lang="python", no_docker=no_docker)
+        except SystemExit:
+            pass
+        except Exception as exc:
+            self.call_from_thread(log.write, f"[red]Demo error: {exc}[/red]")
+        finally:
+            _main.console = _prev
+            self._busy = False
+            self.call_from_thread(self._set_status, "Demo complete.")
 
     # ── Workers ───────────────────────────────────────────────────────────
 
