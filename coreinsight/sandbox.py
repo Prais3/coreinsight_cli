@@ -26,6 +26,7 @@ DOCKERFILES = {
 # ---------------------------------------------------------------------------
 # Verification constants
 # ---------------------------------------------------------------------------
+SANDBOX_SKIPPED_MSG = "Verification skipped (--no-docker)."
 SPEEDUP_DISCREPANCY_TOLERANCE = 0.05  # max relative delta: computed vs reported speedup
 MIN_TIMING_ROWS = 2                   # minimum CSV rows to trust timing statistics
 FLOAT_RTOL = 1e-5                     # relative tolerance for output comparison
@@ -203,7 +204,7 @@ class CodeSandbox:
 
     def execute_benchmark(self, code: str, language: str = "cpp", timeout_seconds: int = 120) -> Tuple[bool, str, Optional[bytes]]:
         if self.disabled:
-            return False, "Verification skipped (--no-docker).", None
+            return False, SANDBOX_SKIPPED_MSG, None
         if not self.client:
             return False, "Docker is not running on the host machine.", None
 
@@ -292,8 +293,8 @@ class CodeSandbox:
     ) -> VerificationResult:
         if self.disabled:
             return VerificationResult(
-                speedup=SpeedupVerification(verified=False, details="Skipped (--no-docker)."),
-                correctness=CorrectnessVerification(verified=False, details="Skipped (--no-docker)."),
+                speedup=SpeedupVerification(verified=False, details=SANDBOX_SKIPPED_MSG),
+                correctness=CorrectnessVerification(verified=False, details=SANDBOX_SKIPPED_MSG),
             )
         speedup_result     = self._verify_speedup(csv_output)
         correctness_result = self._verify_correctness(

@@ -32,7 +32,7 @@ from rich.console import Group
 from coreinsight.config import load_config, run_configure, is_pro, get_tier_limits, PRO_WAITLIST_URL, get_model_tier, get_agent_mode
 from coreinsight.analyzer import AnalyzerAgent, BottleneckAgent, OptimizerAgent, HarnessAgent, TestCaseAgent
 from coreinsight.parser import CodeParser
-from coreinsight.sandbox import CodeSandbox
+from coreinsight.sandbox import CodeSandbox, SANDBOX_SKIPPED_MSG
 from coreinsight.profiler import HardwareProfiler
 from coreinsight.memory import OptimizationMemory
 from coreinsight.indexer import RepoIndexer
@@ -40,6 +40,7 @@ from coreinsight.hardware import HardwareDetector
 from coreinsight.scanner import ProjectScanner
 
 console = Console()
+_default_console = console  # kept for restore after TUI swaps it
 
 # Thread locks to prevent garbled output when multiple threads finish simultaneously
 print_lock = threading.Lock()
@@ -313,6 +314,13 @@ def format_report_markdown(func_name: str, result: dict, sandbox_res: tuple, msg
 
     # ── Normal sandbox path ─────────────────────────────────────────────
     success, logs, plot_data = sandbox_res
+
+    if logs and SANDBOX_SKIPPED_MSG in logs:
+        md += f"### Verification: Skipped (--no-docker)\n"
+        md += f"> Sandbox and verification were disabled at runtime.\n\n"
+        md += "\n---\n"
+        return md
+
     sandbox_icon = "🟢" if success else "❌"
     md += f"### Verification: {sandbox_icon} {'Success' if success else 'Failed'}\n"
 
@@ -408,6 +416,15 @@ def print_console_report(func_name: str, result: dict, sandbox_res: tuple, msg: 
 
     # ── Normal sandbox path ─────────────────────────────────────────────
     success, logs, plot_data = sandbox_res
+
+    # --no-docker path: render as skipped, not failed
+    if logs and SANDBOX_SKIPPED_MSG in logs:
+        content.append(Panel(
+            f"[dim]{logs.strip()}[/dim]",
+            title="Sandbox", border_style="dim"
+        ))
+        console.print(Panel(Group(*content), title=f"🚀 Analysis: [bold]{func_name}[/bold]", border_style=color))
+        return
 
     csv_data = parse_csv_logs(logs)
     if csv_data:
@@ -541,168 +558,177 @@ def _preflight_checks(provider: str, model_name: str, no_docker: bool = False) -
 
     return True
 
-def run_analysis(file_path: str, no_docker: bool = False):
-    path = Path(file_path)
-    if not path.exists() or not path.is_file():
-        console.print(f"[red]Error: File '{file_path}' not found.[/red]")
-        sys.exit(1)
-
-    language = get_language_from_ext(path)
-    if language == "unknown":
-        console.print(f"[red]Error: Unsupported file type '{path.suffix}'. Use .cpp, .cu, or .py[/red]")
-        sys.exit(1)
-
-    config = load_config()
-    provider = config.get("provider", "ollama")
-    model_name = config.get("model_name", "llama3.2")
-    api_keys = config.get("api_keys", {})
-    tier_limits = get_tier_limits(config)
-    pro_user = is_pro(config)
-
-    # ── Preflight: fail fast before AST parsing, image building, or thread spawning ──
-    if not _preflight_checks(provider, model_name, no_docker=no_docker):
-        sys.exit(1)
-
-    tier_label = "[bold green]Pro[/bold green]" if pro_user else "[bold yellow]Free[/bold yellow]"
-    console.print(Panel.fit(f"🚀 CoreInsight: Profiling [bold cyan]{path.name}[/bold cyan] via [bold]{provider}[/bold] · {tier_label}"))
-
-    # 1. PARSE (Synchronous, since it's fast)
-    with console.status("[yellow]Parsing AST and extracting hot loops...[/yellow]"):
-        parser = CodeParser()
-        content_bytes = path.read_bytes()
-        file_content  = content_bytes.decode("utf-8", errors="replace")
-        functions = parser.parse_file(str(path), content_bytes)
+def run_analysis(file_path: str, no_docker: bool = False, tui_console=None):
+    global console
+    _prev_console = console
     
-    if not functions:
-        console.print("[red]No parseable functions found in the file.[/red]")
-        sys.exit(1)
-
-    max_fn = tier_limits["max_functions"]
-    if max_fn is not None and len(functions) > max_fn:
-        console.print(
-            f"[yellow]⚠ Free tier: analysing the first {max_fn} of {len(functions)} functions. "
-            f"Upgrade to Pro for unlimited → [cyan underline]{PRO_WAITLIST_URL}[/cyan underline][/yellow]"
-        )
-        functions = functions[:max_fn]
-
-    console.print(f"[green]✅ Extracted {len(functions)} functional kernels.[/green]\n")
-
-    # Initialize heavy lifters
+    if tui_console is not None:
+        console = tui_console
+    
     try:
-        hardware_specs_dict = HardwareDetector.get_system_specs()
-        hardware_target_str = HardwareDetector.format_for_llm(hardware_specs_dict)
+        path = Path(file_path)
+        if not path.exists() or not path.is_file():
+            console.print(f"[red]Error: File '{file_path}' not found.[/red]")
+            sys.exit(1)
+
+        language = get_language_from_ext(path)
+        if language == "unknown":
+            console.print(f"[red]Error: Unsupported file type '{path.suffix}'. Use .cpp, .cu, or .py[/red]")
+            sys.exit(1)
+
+        config = load_config()
+        provider = config.get("provider", "ollama")
+        model_name = config.get("model_name", "llama3.2")
+        api_keys = config.get("api_keys", {})
+        tier_limits = get_tier_limits(config)
+        pro_user = is_pro(config)
+
+        # ── Preflight: fail fast before AST parsing, image building, or thread spawning ──
+        if not _preflight_checks(provider, model_name, no_docker=no_docker):
+            sys.exit(1)
+
+        tier_label = "[bold green]Pro[/bold green]" if pro_user else "[bold yellow]Free[/bold yellow]"
+        console.print(Panel.fit(f"🚀 CoreInsight: Profiling [bold cyan]{path.name}[/bold cyan] via [bold]{provider}[/bold] · {tier_label}"))
+
+        # 1. PARSE (Synchronous, since it's fast)
+        with console.status("[yellow]Parsing AST and extracting hot loops...[/yellow]"):
+            parser = CodeParser()
+            content_bytes = path.read_bytes()
+            file_content  = content_bytes.decode("utf-8", errors="replace")
+            functions = parser.parse_file(str(path), content_bytes)
         
-        console.print(f"[dim]🎯 Target Hardware Detected: {hardware_target_str}[/dim]")
+        if not functions:
+            console.print("[red]No parseable functions found in the file.[/red]")
+            sys.exit(1)
 
-        model_tier = get_model_tier(provider, model_name)
-        agent      = AnalyzerAgent(provider=provider, model_name=model_name, api_keys=api_keys, model_tier=model_tier)
-        sandbox    = CodeSandbox(disabled=no_docker)
-        db_path    = path.parent / ".coreinsight_db"
-        indexer    = RepoIndexer(str(path.parent)) if db_path.exists() else None
-        profiler   = HardwareProfiler() if pro_user else None
-        memory     = OptimizationMemory()
+        max_fn = tier_limits["max_functions"]
+        if max_fn is not None and len(functions) > max_fn:
+            console.print(
+                f"[yellow]⚠ Free tier: analysing the first {max_fn} of {len(functions)} functions. "
+                f"Upgrade to Pro for unlimited → [cyan underline]{PRO_WAITLIST_URL}[/cyan underline][/yellow]"
+            )
+            functions = functions[:max_fn]
 
-        # Multi-agent setup — create specialized agents if mode requires it
-        agent_mode  = get_agent_mode(config)
-        multi_agents = None
-        if agent_mode == "multi":
-            multi_agents = {
-                "bottleneck": BottleneckAgent(provider=provider, model_name=model_name, api_keys=api_keys, model_tier=model_tier),
-                "optimizer":  OptimizerAgent( provider=provider, model_name=model_name, api_keys=api_keys, model_tier=model_tier),
-                "harness":    HarnessAgent(   provider=provider, model_name=model_name, api_keys=api_keys, model_tier=model_tier),
-                "testcase":   TestCaseAgent(  provider=provider, model_name=model_name, api_keys=api_keys, model_tier=model_tier),
+        console.print(f"[green]✅ Extracted {len(functions)} functional kernels.[/green]\n")
+
+        # Initialize heavy lifters
+        try:
+            hardware_specs_dict = HardwareDetector.get_system_specs()
+            hardware_target_str = HardwareDetector.format_for_llm(hardware_specs_dict)
+            
+            console.print(f"[dim]🎯 Target Hardware Detected: {hardware_target_str}[/dim]")
+
+            model_tier = get_model_tier(provider, model_name)
+            agent      = AnalyzerAgent(provider=provider, model_name=model_name, api_keys=api_keys, model_tier=model_tier)
+            sandbox    = CodeSandbox(disabled=no_docker)
+            db_path    = path.parent / ".coreinsight_db"
+            indexer    = RepoIndexer(str(path.parent)) if db_path.exists() else None
+            profiler   = HardwareProfiler() if pro_user else None
+            memory     = OptimizationMemory()
+
+            # Multi-agent setup — create specialized agents if mode requires it
+            agent_mode  = get_agent_mode(config)
+            multi_agents = None
+            if agent_mode == "multi":
+                multi_agents = {
+                    "bottleneck": BottleneckAgent(provider=provider, model_name=model_name, api_keys=api_keys, model_tier=model_tier),
+                    "optimizer":  OptimizerAgent( provider=provider, model_name=model_name, api_keys=api_keys, model_tier=model_tier),
+                    "harness":    HarnessAgent(   provider=provider, model_name=model_name, api_keys=api_keys, model_tier=model_tier),
+                    "testcase":   TestCaseAgent(  provider=provider, model_name=model_name, api_keys=api_keys, model_tier=model_tier),
+                }
+        except Exception as e:
+            console.print(f"[red]Initialization Error:[/red] {e}")
+            sys.exit(1)
+
+        mode_label = "[bold cyan]Multi-Agent[/bold cyan]" if agent_mode == "multi" else "[dim]Single-Agent[/dim]"
+        console.print(f"[dim]⚙️  Agent mode: {mode_label}[/dim]")
+
+        mem_count = memory.stats().get("count", 0)
+        if mem_count > 0:
+            console.print(
+                f"[dim]⚡ Optimization memory: [bold cyan]{mem_count}[/bold cyan] "
+                f"verified optimization(s) in local store[/dim]"
+            )
+
+        # Prepare Live Markdown File
+        report_path = path.with_name(f"{path.stem}_coreinsight_report.md")
+        with open(report_path, "w", encoding="utf-8") as f:
+            f.write(f"# CoreInsight Performance Report: `{path.name}`\n\n")
+            f.write("> **Note:** This file updates live as the AI completes hardware verification.\n\n---\n\n")
+        
+        console.print(f"[bold blue]📄 Live report created at:[/bold blue] [underline]{report_path.absolute()}[/underline]\n")
+        console.print("[dim]Analyzing functions in parallel. Results will appear as they complete...[/dim]\n")
+
+        # 2. PARALLEL EXECUTION
+        # Limit max_workers to 4 so we don't overwhelm local Docker engine or local Ollama GPU VRAM
+        max_workers = min(4, len(functions)) 
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all functions to the thread pool
+            future_to_func = {
+                executor.submit(process_function, func, language, agent, sandbox, indexer, hardware_target_str, tier_limits, profiler, file_content, str(path.parent), memory, agent_mode, multi_agents): func
+                for func in functions
             }
-    except Exception as e:
-        console.print(f"[red]Initialization Error:[/red] {e}")
-        sys.exit(1)
 
-    mode_label = "[bold cyan]Multi-Agent[/bold cyan]" if agent_mode == "multi" else "[dim]Single-Agent[/dim]"
-    console.print(f"[dim]⚙️  Agent mode: {mode_label}[/dim]")
+            # As each thread finishes, process its output instantly
+            for future in concurrent.futures.as_completed(future_to_func):
+                func = future_to_func[future]
+                try:
+                    func_name, result, sandbox_res, msg, verification, profiler_result, memory_hit, was_valid = future.result()
 
-    mem_count = memory.stats().get("count", 0)
-    if mem_count > 0:
-        console.print(
-            f"[dim]⚡ Optimization memory: [bold cyan]{mem_count}[/bold cyan] "
-            f"verified optimization(s) in local store[/dim]"
-        )
+                    # Store if the benchmark actually ran and achieved real speedup.
+                    # We use is_valid_optimization (≥1.05x measured speedup) rather
+                    # than verification.speedup.verified because timer resolution at
+                    # small N frequently causes the cross-check to flag a discrepancy
+                    # even when the optimization is genuine.
+                    if (
+                        memory_hit is None
+                        and was_valid
+                        and result is not None
+                    ):
+                        stored = memory.store(
+                            original_code=func['code'],
+                            func_name=func_name,
+                            language=language,
+                            result=result,
+                            verification=verification,
+                            profiler_result=profiler_result,
+                        )
+                        if stored:
+                            _log(func_name, "💾 Stored in optimization memory", style="dim cyan")
 
-    # Prepare Live Markdown File
-    report_path = path.with_name(f"{path.stem}_coreinsight_report.md")
-    with open(report_path, "w", encoding="utf-8") as f:
-        f.write(f"# CoreInsight Performance Report: `{path.name}`\n\n")
-        f.write("> **Note:** This file updates live as the AI completes hardware verification.\n\n---\n\n")
-    
-    console.print(f"[bold blue]📄 Live report created at:[/bold blue] [underline]{report_path.absolute()}[/underline]\n")
-    console.print("[dim]Analyzing functions in parallel. Results will appear as they complete...[/dim]\n")
+                    # 1. Format and save to Markdown file
+                    output_md = format_report_markdown(func_name, result, sandbox_res, msg, language, path.parent, verification, profiler_result, memory_hit)
 
-    # 2. PARALLEL EXECUTION
-    # Limit max_workers to 4 so we don't overwhelm local Docker engine or local Ollama GPU VRAM
-    max_workers = min(4, len(functions)) 
-    
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all functions to the thread pool
-        future_to_func = {
-            executor.submit(process_function, func, language, agent, sandbox, indexer, hardware_target_str, tier_limits, profiler, file_content, str(path.parent), memory, agent_mode, multi_agents): func
-            for func in functions
-        }
+                    # Write to File (Safely)
+                    with file_lock:
+                        with open(report_path, "a", encoding="utf-8") as f:
+                            f.write(output_md)
 
-        # As each thread finishes, process its output instantly
-        for future in concurrent.futures.as_completed(future_to_func):
-            func = future_to_func[future]
-            try:
-                func_name, result, sandbox_res, msg, verification, profiler_result, memory_hit, was_valid = future.result()
+                    # 2. Print beautiful native UI to the terminal
+                    with print_lock:
+                        print_console_report(func_name, result, sandbox_res, msg, language, verification, profiler_result, memory_hit)
+                    
+                except Exception as exc:
+                    with print_lock:
+                        console.print(f"[bold red]❌ Critical failure in thread processing {func['name']}:[/bold red] {exc}")
 
-                # Store if the benchmark actually ran and achieved real speedup.
-                # We use is_valid_optimization (≥1.05x measured speedup) rather
-                # than verification.speedup.verified because timer resolution at
-                # small N frequently causes the cross-check to flag a discrepancy
-                # even when the optimization is genuine.
-                if (
-                    memory_hit is None
-                    and was_valid
-                    and result is not None
-                ):
-                    stored = memory.store(
-                        original_code=func['code'],
-                        func_name=func_name,
-                        language=language,
-                        result=result,
-                        verification=verification,
-                        profiler_result=profiler_result,
-                    )
-                    if stored:
-                        _log(func_name, "💾 Stored in optimization memory", style="dim cyan")
+        console.print(Panel.fit(f"✅ [bold green]Analysis Complete![/bold green] Final report saved to:\n{report_path.absolute()}"))
 
-                # 1. Format and save to Markdown file
-                output_md = format_report_markdown(func_name, result, sandbox_res, msg, language, path.parent, verification, profiler_result, memory_hit)
-
-                # Write to File (Safely)
-                with file_lock:
-                    with open(report_path, "a", encoding="utf-8") as f:
-                        f.write(output_md)
-
-                # 2. Print beautiful native UI to the terminal
-                with print_lock:
-                    print_console_report(func_name, result, sandbox_res, msg, language, verification, profiler_result, memory_hit)
-                
-            except Exception as exc:
-                with print_lock:
-                    console.print(f"[bold red]❌ Critical failure in thread processing {func['name']}:[/bold red] {exc}")
-
-    console.print(Panel.fit(f"✅ [bold green]Analysis Complete![/bold green] Final report saved to:\n{report_path.absolute()}"))
-
-    if not pro_user:
-        console.print(Panel(
-            "[bold]Enjoyed CoreInsight?[/bold] Pro unlocks:\n"
-            "  • [cyan]Cloud models[/cyan] (GPT-4o, Claude, Gemini)\n"
-            "  • [cyan]Unlimited functions[/cyan] per file\n"
-            "  • [cyan]5 retry attempts[/cyan] + deeper test coverage\n"
-            "  • [cyan]AI-free hardware profiling[/cyan] — cProfile + perf stat evidence in every report\n\n"
-            f"[bold yellow]Pro is free during beta.[/bold yellow] Request a key:\n"
-            f"[cyan underline]{PRO_WAITLIST_URL}[/cyan underline]",
-            title="⚡  Upgrade to Pro — free during beta",
-            border_style="yellow",
-        ))
+        if not pro_user:
+            console.print(Panel(
+                "[bold]Enjoyed CoreInsight?[/bold] Pro unlocks:\n"
+                "  • [cyan]Cloud models[/cyan] (GPT-4o, Claude, Gemini)\n"
+                "  • [cyan]Unlimited functions[/cyan] per file\n"
+                "  • [cyan]5 retry attempts[/cyan] + deeper test coverage\n"
+                "  • [cyan]AI-free hardware profiling[/cyan] — cProfile + perf stat evidence in every report\n\n"
+                f"[bold yellow]Pro is free during beta.[/bold yellow] Request a key:\n"
+                f"[cyan underline]{PRO_WAITLIST_URL}[/cyan underline]",
+                title="⚡  Upgrade to Pro — free during beta",
+                border_style="yellow",
+            ))
+    finally:
+        console = _prev_console
 
 def run_demo(lang: str = "python", no_docker: bool = False):
     import shutil
@@ -902,6 +928,9 @@ def main_cli():
     memory_parser = subparsers.add_parser("memory", help="Inspect or clear the local optimization memory")
     memory_parser.add_argument("--clear", action="store_true", help="Wipe the memory store")
 
+    view_parser = subparsers.add_parser("view", help="Launch the interactive TUI")
+    view_parser.add_argument("--dir", default=".", help="Starting directory (default: current)")
+
     scan_parser = subparsers.add_parser("scan", help="Scan directory for complex hotspots")
     scan_parser.add_argument("--dir", default=".", help="Directory to scan")
     scan_parser.add_argument("--top", type=int, default=10, help="Number of hotspots to show")
@@ -913,6 +942,9 @@ def main_cli():
             pro_key=getattr(args, "pro_key", None),
             agent_mode=getattr(args, "agent_mode", None),
         )
+    elif args.command == "view":
+        from coreinsight.tui import run_tui
+        run_tui(start_dir=getattr(args, "dir", "."))
     elif args.command == "demo":
         run_demo(getattr(args, "lang", "python"), no_docker=getattr(args, "no_docker", False))
     elif args.command == "analyze":

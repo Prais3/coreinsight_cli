@@ -18,6 +18,7 @@ FREE_TIER_LIMITS = {
     "max_retries":       2,
     "num_test_cases":    8,
     "hardware_profiling": False,
+    "max_files": 2,
 }
 
 PRO_TIER_LIMITS = {
@@ -25,6 +26,7 @@ PRO_TIER_LIMITS = {
     "max_retries":       5,
     "num_test_cases":    15,
     "hardware_profiling": True,
+    "max_files": None,
 }
 
 SMALL_MODELS  = ["llama3.2:3b", "llama3.2:1b", "codellama:7b", "llama3:7b", "mistral:7b"]
@@ -168,6 +170,7 @@ def run_configure(pro_key: str = None, agent_mode: str = None):
     if provider == "ollama":
         config["model_name"] = Prompt.ask("Ollama model name", default=config.get("model_name", "llama3.2"))
     elif provider == "local_server":
+        from rich.panel import Panel
         console.print(Panel(
             "[bold]Local inference server setup[/bold]\n\n"
             "CoreInsight talks to any OpenAI-compatible local server.\n"
