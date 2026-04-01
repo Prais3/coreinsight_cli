@@ -272,8 +272,15 @@ def process_function(func: dict, language: str, agent: AnalyzerAgent, sandbox: C
         return func_name, result, (success, logs, plot_data), None, verification, profiler_result, None, is_valid_optimization
 
     except Exception as e:
+        err_str = str(e)
+        if "context" in err_str.lower() and "limit" in err_str.lower():
+            _log(func_name, f"Context limit hit: {e}", style="bold yellow")
+            return func_name, None, None, (
+                f"⚠️  Context limit: {err_str}\n"
+                f"Try a model with a larger context window, or split the function."
+            ), None, None, None, False
         _log(func_name, f"Failed: {e}", style="bold red")
-        return func_name, None, None, f"❌ Analysis failed: {str(e)}", None, None, None, False
+        return func_name, None, None, f"❌ Analysis failed: {err_str}", None, None, None, False
 
 def parse_csv_logs(logs: str):
     """Safely extracts CSV data from the sandbox logs."""
