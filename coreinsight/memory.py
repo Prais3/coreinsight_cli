@@ -186,6 +186,77 @@ class OptimizationMemory:
             logger.debug(f"Memory lookup failed: {exc}")
             return None
 
+    def export(self, output_path: str, fmt: str = "csv") -> int:
+        """
+        Export all stored optimizations to CSV or Markdown.
+        Returns the number of records written, or 0 on failure.
+        """
+        import csv as _csv
+        from pathlib import Path as _Path
+
+        if not self._ensure_db():
+            return 0
+
+        try:
+            all_records = self._collection.get(include=["metadatas"])
+            metadatas   = all_records.get("metadatas", []) or []
+        except Exception as e:
+            logger.error(f"Export failed reading store: {e}")
+            return 0
+
+        if not metadatas:
+            return 0
+
+        # Sort most recent first
+        metadatas = sorted(
+            metadatas,
+            key=lambda m: m.get("timestamp", ""),
+            reverse=True,
+        )
+
+        out = _Path(output_path)
+
+        if fmt == "csv":
+            with open(out, "w", newline="", encoding="utf-8") as f:
+                writer = _csv.writer(f)
+                writer.writerow([
+                    "func_name", "language", "severity", "issue",
+                    "avg_speedup", "correctness_cases",
+                    "hardware_evidence", "verified_at", "optimized_code",
+                ])
+                for m in metadatas:
+                    writer.writerow([
+                        m.get("func_name",        ""),
+                        m.get("language",         ""),
+                        m.get("severity",         ""),
+                        m.get("issue",            ""),
+                        m.get("avg_speedup",      ""),
+                        m.get("correctness_cases",""),
+                        m.get("profiler_summary", ""),
+                        m.get("timestamp",        "")[:19].replace("T", " "),
+                        m.get("optimized_code",   ""),
+                    ])
+
+        elif fmt == "md":
+            with open(out, "w", encoding="utf-8") as f:
+                f.write("# CoreInsight Optimization Memory Export\n\n")
+                for i, m in enumerate(metadatas, 1):
+                    lang = m.get("language", "")
+                    f.write(f"## {i}. `{m.get('func_name', 'unknown')}` ({lang})\n\n")
+                    f.write(f"- **Severity:** {m.get('severity', '')}\n")
+                    f.write(f"- **Issue:** {m.get('issue', '')}\n")
+                    f.write(f"- **Avg speedup:** {float(m.get('avg_speedup', 0)):.2f}x\n")
+                    f.write(f"- **Correctness cases:** {m.get('correctness_cases', '')}\n")
+                    f.write(f"- **Verified at:** {m.get('timestamp', '')[:19].replace('T', ' ')}\n")
+                    if m.get("profiler_summary"):
+                        f.write(f"- **Hardware evidence:** {m.get('profiler_summary')}\n")
+                    code = m.get("optimized_code", "").strip()
+                    if code:
+                        f.write(f"\n```{lang}\n{code}\n```\n")
+                    f.write("\n---\n\n")
+
+        return len(metadatas)
+
     def store(
         self,
         original_code:  str,

@@ -810,11 +810,22 @@ def run_demo(lang: str = "python", no_docker: bool = False):
 
     run_analysis(str(demo_dir / entry_file), no_docker=no_docker)
 
-def _run_memory_cmd(clear: bool):
+def _run_memory_cmd(clear: bool, export_path: str = None, export_fmt: str = "csv"):
     from coreinsight.memory import OptimizationMemory, MEMORY_DIR
     import shutil
 
     mem = OptimizationMemory()
+
+    if export_path:
+        count = mem.export(export_path, fmt=export_fmt)
+        if count:
+            console.print(
+                f"[bold green]✅ Exported {count} optimization(s) to "
+                f"[cyan]{export_path}[/cyan][/bold green]"
+            )
+        else:
+            console.print("[yellow]Nothing to export — memory store is empty.[/yellow]")
+        return
 
     if clear:
         if MEMORY_DIR.exists():
@@ -937,7 +948,12 @@ def main_cli():
     index_parser.add_argument("--dir", default=".", help="Directory to index")
     
     memory_parser = subparsers.add_parser("memory", help="Inspect or clear the local optimization memory")
-    memory_parser.add_argument("--clear", action="store_true", help="Wipe the memory store")
+    memory_parser.add_argument("--clear",  action="store_true", help="Wipe the memory store")
+    memory_parser.add_argument("--export", dest="export_path",  default=None,
+                               help="Export memory to file (e.g. --export optimizations.csv)")
+    memory_parser.add_argument("--format", dest="export_fmt",   default="csv",
+                               choices=["csv", "md"],
+                               help="Export format: csv (default) or md")
 
     view_parser = subparsers.add_parser("view", help="Launch the interactive TUI")
     view_parser.add_argument("--dir", default=".", help="Starting directory (default: current)")
@@ -961,7 +977,11 @@ def main_cli():
     elif args.command == "analyze":
         run_analysis(args.file, no_docker=getattr(args, "no_docker", False))
     elif args.command == "memory":
-        _run_memory_cmd(getattr(args, "clear", False))
+        _run_memory_cmd(
+            clear=getattr(args, "clear", False),
+            export_path=getattr(args, "export_path", None),
+            export_fmt=getattr(args, "export_fmt", "csv"),
+        )
     elif args.command == "scan":
         scanner = ProjectScanner(args.dir)
         scanner.scan_project(max_results=args.top)

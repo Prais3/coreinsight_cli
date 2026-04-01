@@ -109,9 +109,17 @@ class MemoryModal(ModalScreen):
     MemoryModal #memory-log {
         height: 1fr;
     }
-    MemoryModal #close-memory {
+    MemoryModal #memory-buttons {
         margin-top: 1;
-        width: 100%;
+        align: center middle;
+    }
+    MemoryModal #memory-buttons Button {
+        margin: 0 1;
+    }
+    MemoryModal #export-status {
+        height: 1;
+        margin-top: 1;
+        color: $success;
     }
     """
 
@@ -119,7 +127,11 @@ class MemoryModal(ModalScreen):
         with Container():
             yield Label("Optimization Memory", id="memory-title")
             yield RichLog(id="memory-log", highlight=True, markup=True)
-            yield Button("Close  [Esc]", id="close-memory", variant="default")
+            with Horizontal(id="memory-buttons"):
+                yield Button("Export CSV", id="export-csv", variant="primary")
+                yield Button("Export MD",  id="export-md",  variant="primary")
+                yield Button("Close [Esc]",id="close-memory",variant="default")
+            yield Label("", id="export-status")
 
     def on_mount(self) -> None:
         log = self.query_one("#memory-log", RichLog)
@@ -196,6 +208,27 @@ class MemoryModal(ModalScreen):
     @on(Button.Pressed, "#close-memory")
     def close(self) -> None:
         self.dismiss()
+        
+    @on(Button.Pressed, "#export-csv")
+    def export_csv(self) -> None:
+        self._do_export("csv")
+
+    @on(Button.Pressed, "#export-md")
+    def export_md(self) -> None:
+        self._do_export("md")
+
+    def _do_export(self, fmt: str) -> None:
+        from pathlib import Path
+        from coreinsight.memory import OptimizationMemory
+
+        out  = Path.cwd() / f"coreinsight_memory_export.{fmt}"
+        mem  = OptimizationMemory()
+        count = mem.export(str(out), fmt=fmt)
+        status = self.query_one("#export-status", Label)
+        if count:
+            status.update(f"[green]Exported {count} record(s) to {out.name}[/green]")
+        else:
+            status.update("[yellow]Nothing to export.[/yellow]")
 
 
 # ---------------------------------------------------------------------------
