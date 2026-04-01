@@ -102,17 +102,20 @@ def _run_single_agent(
     while not is_valid and retry_count < max_retries:
         if getattr(sandbox, 'disabled', False):
             break
+        error_hint = ""
         if success:
             if "N,Original_Time" not in logs:
-                logs += "\nERROR: Script ran but DID NOT print the CSV table. You MUST print the strict CSV format."
+                error_hint = "\nERROR: Script ran but DID NOT print the CSV table. You MUST print the strict CSV format."
             else:
-                logs += "\nERROR: Optimized code was SLOWER. Rewrite to be faster."
-        harness_code            = agent.fix_harness(func_name, original_code, harness_code, logs, language, context=context)
+                error_hint = "\nERROR: Optimized code was SLOWER. Rewrite to be faster."
+        harness_code             = agent.fix_harness(func_name, original_code, harness_code, logs + error_hint, language, context=context)
         success, logs, plot_data = sandbox.execute_benchmark(harness_code, language)
         is_valid                 = _check_speedup_success(success, logs)
         retry_count             += 1
 
-    if is_valid and retry_count > 0:
+    if getattr(sandbox, 'disabled', False):
+        pass  # skipped intentionally — don't annotate as failed
+    elif is_valid and retry_count > 0:
         logs = f"(Succeeded after {retry_count} retries)\n" + logs
     elif not is_valid:
         logs    = f"(Failed after {retry_count} retries)\n" + logs
@@ -231,7 +234,8 @@ def process_function(func: dict, language: str, agent: AnalyzerAgent, sandbox: C
         # 3. Verification + AI-free hardware profiling
         verification    = None
         profiler_result = None
-        if is_valid_optimization:
+        docker_active = not getattr(sandbox, 'disabled', False)
+        if is_valid_optimization and docker_active:
             # Multi-agent: test cases already generated in parallel with harness
             # Single-agent: generate them now
             if agent_mode == "multi" and result.get("_test_cases") is not None:
@@ -419,11 +423,11 @@ def print_console_report(func_name: str, result: dict, sandbox_res: tuple, msg: 
 
     # --no-docker path: render as skipped, not failed
     if logs and SANDBOX_SKIPPED_MSG in logs:
-        content.append(Panel(
-            f"[dim]{logs.strip()}[/dim]",
-            title="Sandbox", border_style="dim"
+        content.append(Text.from_markup(
+            "[dim]Sandbox verification skipped (--no-docker). "
+            "The optimized code above has not been benchmarked or verified.[/dim]"
         ))
-        console.print(Panel(Group(*content), title=f"🚀 Analysis: [bold]{func_name}[/bold]", border_style=color))
+        console.print(Panel(Group(*content), title=f"Analysis: [bold]{func_name}[/bold]", border_style=color))
         return
 
     csv_data = parse_csv_logs(logs)
