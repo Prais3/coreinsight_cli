@@ -10,10 +10,10 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/p/coreinsight-cli # Optional: adds link to GH UI
+      url: https://pypi.org/p/coreinsight-cli
     permissions:
-      id-token: write   # Mandatory for OIDC (Trusted Publishing)
-      contents: read    # Standard practice
+      id-token: write
+      contents: read
 
     steps:
       - name: Checkout code
@@ -32,4 +32,3 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
-        # No 'with: password' needed if Trusted Publishing is set up on PyPI
