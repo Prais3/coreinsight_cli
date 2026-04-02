@@ -676,6 +676,7 @@
             <li><a href="#how">Pipeline</a></li>
             <li><a href="#memory">Memory</a></li>
             <li><a href="#tiers">Tiers</a></li>
+            <li><a href="#enterprise">Enterprise</a></li>
             <li><a href="https://github.com/Prais3/coreinsight_cli" target="_blank">GitHub</a></li>
             <li><a class="nav-cta" href="#beta">Get Pro →</a></li>
         </ul>
@@ -860,7 +861,7 @@
             <div class="step">
                 <div class="step-num">06</div>
                 <div class="step-content">
-                    <h3>AI-free hardware evidence <span class="step-tag tag-pro">pro</span></h3>
+                    <h3>AI-free hardware evidence</h3>
                     <p>cProfile and perf stat run against both versions. Hardware counters are written to the report as deterministic, LLM-independent proof.</p>
                 </div>
             </div>
@@ -1004,13 +1005,44 @@
                     <td class="check">✓</td>
                     <td class="check">✓</td>
                 </tr>
-                <tr>
-                    <td>--no-docker mode</td>
-                    <td class="check">✓</td>
-                    <td class="check">✓</td>
-                </tr>
             </tbody>
         </table>
+    </div>
+</section>
+
+<!-- Enterprise -->
+<section id="enterprise">
+    <div class="wrap">
+        <div class="section-label">Enterprise</div>
+        <h2>Built for teams<br>shipping production code.</h2>
+        <p style="max-width:600px;">
+            CoreInsight's core engine is open source. The enterprise layer is built
+            for engineering teams that need performance guarantees at scale —
+            integrated directly into the development workflow, not bolted on after the fact.
+        </p>
+        <div class="pillars" style="margin-top:36px;">
+            <div class="pillar">
+                <div class="pillar-num">TEAMS</div>
+                <h3>Shared optimization memory</h3>
+                <p>Every verified optimization your team produces is stored and recalled across the entire codebase. The tool learns your patterns, not just individual files.</p>
+            </div>
+            <div class="pillar">
+                <div class="pillar-num">WORKFLOW</div>
+                <h3>Integrated verification</h3>
+                <p>Performance regressions are caught before they ship. Every change is measured against hardware reality, not benchmarks that only run in CI when someone remembers.</p>
+            </div>
+            <div class="pillar">
+                <div class="pillar-num">EVIDENCE</div>
+                <h3>Auditable hardware proof</h3>
+                <p>Every optimization decision comes with deterministic hardware counters — not model confidence scores. Your team can see exactly why a change was accepted or rejected.</p>
+            </div>
+        </div>
+        <p style="margin-top:36px; font-size:14px;">
+            Interested in CoreInsight for your engineering team?
+            <a href="mailto:coreinsight_dev@proton.me" style="color:var(--green); text-decoration:none;">
+                Get in touch →
+            </a>
+        </p>
     </div>
 </section>
 
@@ -1033,7 +1065,13 @@
                 </a>
             </div>
             <p style="margin-top:28px; font-size:13px; color:var(--muted);">
-                Already have a key?&nbsp;
+                Building something interesting? CoreInsight is open source and welcoming
+                contributors, testers, and early users.
+                <a href="https://github.com/Prais3/coreinsight_cli" target="_blank"
+                   style="color:var(--green); text-decoration:none;">
+                    Open an issue or PR on GitHub →
+                </a>
+            </p>
                 <code style="color:var(--green)">coreinsight configure --pro-key &lt;your-key&gt;</code>
             </p>
         </div>
