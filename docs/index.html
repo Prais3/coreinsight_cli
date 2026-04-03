@@ -705,8 +705,8 @@
             <span>$</span> pip install coreinsight-cli
         </div>
         <div class="version-badge">
-            <span class="vnum">v0.2.8</span>
-            latest stable · open source · GPL-3.0
+            <span class="vnum">v0.3.0</span>
+            latest stable · GPL-3.0 License
         </div>
 
         <!-- TUI mockup -->
@@ -788,29 +788,29 @@
                 <div class="pillar-num">01 — VERIFICATION</div>
                 <h3>Two-pillar sandbox</h3>
                 <p>
-                    Every optimization runs through independent checks inside Docker:
+                    Every optimization runs through independent checks:
                     speedup integrity (recomputed from raw timing) and output correctness
                     (identical test inputs, float tolerance). Hallucinated speedups are
-                    flagged and rejected. No Docker? Run with <code style="color:var(--green)">--no-docker</code> to skip sandboxing.
+                    flagged and rejected.
                 </p>
             </div>
             <div class="pillar">
                 <div class="pillar-num">02 — EVIDENCE</div>
                 <h3>AI-free hardware profiling</h3>
                 <p>
-                    Real tools — cProfile, perf stat — measure wall time, function calls,
-                    cache misses, and CPU cycles. These numbers come from silicon, not a
-                    language model. Deterministic. Auditable. Pro feature.
+                    Real tools — cProfile, perf stat, nsys — measure wall time, function calls,
+                    cache misses, and CPU cycles. These numbers come from silicon, not from a
+                    language model. Deterministic and Auditable. 
                 </p>
             </div>
             <div class="pillar">
                 <div class="pillar-num">03 — MEMORY</div>
                 <h3>Optimization memory</h3>
                 <p>
-                    A local vector database stores every verified result. On new analyses,
+                    A local database stores every verified result. On new analyses,
                     semantically similar past optimizations are retrieved before the LLM
                     is called. A match skips the entire pipeline and returns instantly —
-                    with full provenance. Export anytime as CSV or Markdown.
+                    with full provenance. Export contents of your database anytime.
                 </p>
             </div>
         </div>
@@ -834,7 +834,7 @@
                 <div class="step-num">02</div>
                 <div class="step-content">
                     <h3>AST parsing + RAG context</h3>
-                    <p>tree-sitter extracts functions. ChromaDB retrieves cross-file dependencies so the LLM understands your structs, types, and helpers. Works fully offline.</p>
+                    <p>Custom parser extracts functions. Database retrieves cross-file dependencies so the LLM understands your structs, types, and helpers. Works fully offline.</p>
                 </div>
             </div>
             <div class="step">
@@ -848,28 +848,28 @@
                 <div class="step-num">04</div>
                 <div class="step-content">
                     <h3>Autonomous retry loop</h3>
-                    <p>Generated harness runs in Docker. If it fails or produces no real speedup, the LLM is sent the error and asked to fix it — up to 5 times on Pro.</p>
+                    <p>Generated harness runs in sandbox environments. If it fails or produces no real speedup, the LLM is sent the error and asked to fix it.</p>
                 </div>
             </div>
             <div class="step">
                 <div class="step-num">05</div>
                 <div class="step-content">
                     <h3>Mathematical verification</h3>
-                    <p>Speedup is recomputed from raw timing columns and cross-checked. Correctness is tested against LLM-generated inputs in a fresh container.</p>
+                    <p>Speedup is recomputed from raw timing columns and cross-checked. Correctness is tested against LLM-generated inputs in a fresh sandbox.</p>
                 </div>
             </div>
             <div class="step">
                 <div class="step-num">06</div>
                 <div class="step-content">
                     <h3>AI-free hardware evidence</h3>
-                    <p>cProfile and perf stat run against both versions. Hardware counters are written to the report as deterministic, LLM-independent proof.</p>
+                    <p>Raw CPU and hardware statistics are collected. Hardware counters are written to the report as deterministic, LLM-independent proof.</p>
                 </div>
             </div>
             <div class="step">
                 <div class="step-num">07</div>
                 <div class="step-content">
                     <h3>Store to memory</h3>
-                    <p>The verified result, speedup, and profiler evidence are stored in the local vector database. The next similar function starts at step 01.</p>
+                    <p>The verified result, speedup, and profiling evidence is stored in the local database. The next similar function starts at step 01.</p>
                 </div>
             </div>
         </div>
@@ -879,7 +879,7 @@
 <!-- Memory -->
 <section id="memory">
     <div class="wrap">
-        <div class="section-label">v0.2.8</div>
+        <div class="section-label">v0.3.0</div>
         <h2>The tool gets smarter<br>every time you use it</h2>
         <p style="max-width:580px;">
             Optimization memory moves CoreInsight from a stateless code tool toward
@@ -889,12 +889,12 @@
         <div class="memory-card">
             <div class="memory-header">
                 <div class="memory-dot"></div>
-                <h3>Local optimization store — ~/.coreinsight/memory_db</h3>
+                <h3>Local optimization store</h3>
             </div>
             <div class="memory-body">
                 <div class="memory-stat">
                     <strong><span>⚡</span> Instant</strong>
-                    recall on exact and near-exact function matches — no LLM call, no Docker spin-up
+                    recall on exact and near-exact function matches — no LLM call, no sandbox spin-up
                 </div>
                 <div class="memory-stat">
                     <strong>100<span>%</span></strong>
@@ -912,9 +912,6 @@
         </div>
         <div class="memory-commands">
             <div class="cmd-pill"><span>$</span>coreinsight memory</div>
-            <div class="cmd-pill"><span>$</span>coreinsight memory --export optimizations.csv</div>
-            <div class="cmd-pill"><span>$</span>coreinsight memory --export report.md --format md</div>
-            <div class="cmd-pill"><span>$</span>coreinsight memory --clear</div>
         </div>
     </div>
 </section>
@@ -926,21 +923,20 @@
         <h2>Recent releases</h2>
         <div class="changelog">
             <div class="changelog-item">
+                <div class="changelog-ver">Coming soon -> v0.3.0</div>
+                <p><strong>Streaming inference, Context limit handling, tier-aware inference and more!</strong></p>
+            </div>
+            <div class="changelog-item">
+                <div class="changelog-ver">v0.2.9</div>
+                <p><strong>TUI improvement, sandbox free generation and CUDA profiling.</strong></p>
+            </div>
+            <div class="changelog-item">
                 <div class="changelog-ver">v0.2.8</div>
-                <p><strong>Context limit handling, tier-aware inference, TUI configure/demo/export.</strong> Small and local_server models now get context-appropriate token budgets. Truncated LLM output detected and rejected cleanly. Full Configure modal in TUI — no CLI needed for setup.</p>
+                <p><strong>Stronger smaller model support, local server improvement, Interactive TUI and memory export.</strong></p>
             </div>
             <div class="changelog-item">
-                <div class="changelog-ver">v0.2.7</div>
-                <p><strong>Interactive TUI + --no-docker flag.</strong> <code style="color:var(--green)">coreinsight view</code> launches a full terminal UI with file browser, live output, and memory viewer. <code style="color:var(--green)">--no-docker</code> skips sandboxing for users without Docker installed.</p>
-            </div>
-            <div class="changelog-item">
-                <div class="changelog-ver">v0.2.6</div>
-                <p><strong>Offline embeddings + SQLite compat.</strong> RAG indexer now falls back to a deterministic hash embedder when offline. pysqlite3-binary shim added for older Ubuntu/Debian systems.</p>
-            </div>
-            <div class="changelog-item">
-                <div class="changelog-ver">v0.2.5</div>
-                <p><strong>Multi-agent mode.</strong> BottleneckAgent → OptimizerAgent → HarnessAgent + TestCaseAgent run in parallel. Auto-selected by model tier. Tiered prompt profiles for small, medium, and large models.</p>
-            </div>
+                <div class="changelog-ver">Previous</div>
+                <p><strong>Multi-agent vs single-agent mode, offline compatibility and improved small model harness.</strong></p> 
         </div>
     </div>
 </section>
@@ -950,7 +946,7 @@
     <div class="wrap">
         <div class="section-label">Pricing</div>
         <h2>Free by default.<br>Pro is free during beta.</h2>
-        <p>Pro features are being unlocked manually during the beta period. Request a key and get access immediately.</p>
+        <p>Pro features are being unlocked manually during the beta period. Request a key and get access to frontier models immediately.</p>
         <table class="tier-table">
             <thead>
                 <tr>
@@ -971,12 +967,12 @@
                     <td class="check">✓</td>
                 </tr>
                 <tr>
-                    <td>Interactive TUI (coreinsight view)</td>
+                    <td>Interactive TUI</td>
                     <td class="check">✓</td>
                     <td class="check">✓</td>
                 </tr>
                 <tr>
-                    <td>Files per TUI session</td>
+                    <td>Files per session</td>
                     <td>2</td>
                     <td>Unlimited</td>
                 </tr>
@@ -986,22 +982,22 @@
                     <td>Unlimited</td>
                 </tr>
                 <tr>
-                    <td>Autonomous retry attempts</td>
+                    <td>Autonomous sandbox attempts</td>
                     <td>2</td>
                     <td>5</td>
                 </tr>
                 <tr>
-                    <td>Correctness test cases</td>
+                    <td>Correctness testing</td>
                     <td>8</td>
                     <td>15</td>
                 </tr>
                 <tr>
-                    <td>AI-free hardware profiling (cProfile, perf stat)</td>
-                    <td class="dash">—</td>
+                    <td>AI-free hardware profiling</td>
+                    <td class="check">—</td>
                     <td class="check">✓</td>
                 </tr>
                 <tr>
-                    <td>Optimization memory + export</td>
+                    <td>Optimization memory</td>
                     <td class="check">✓</td>
                     <td class="check">✓</td>
                 </tr>
@@ -1018,7 +1014,7 @@
         <p style="max-width:600px;">
             CoreInsight's core engine is open source. The enterprise layer is built
             for engineering teams that need performance guarantees at scale —
-            integrated directly into the development workflow, not bolted on after the fact.
+            integrated directly into their development workflow, not bolted on after the fact.
         </p>
         <div class="pillars" style="margin-top:36px;">
             <div class="pillar">
@@ -1054,26 +1050,28 @@
             <h2>Request your Pro key</h2>
             <p>
                 Pro is free during beta. Fill in the form and a key will be sent to you.
-                Takes 30 seconds to unlock cloud models and hardware profiling.
+                Takes 30 seconds to unlock cloud models and more!
             </p>
-            <div style="display:flex; gap:14px; justify-content:center; flex-wrap:wrap;">
+            <div style="display:flex; gap:14px; justify-content:center; flex-wrap:wrap; margin-bottom:28px;">
                 <a class="btn-primary" href="https://tally.so/r/xXZ9YE" target="_blank">
                     Request a Pro key →
                 </a>
                 <a class="btn-ghost" href="https://pypi.org/project/coreinsight-cli/" target="_blank">
                     Install free tier
                 </a>
+                <code style="color:var(--green)">coreinsight configure --pro-key &lt;your-key&gt;</code>
             </div>
-            <p style="margin-top:28px; font-size:13px; color:var(--muted);">
-                Building something interesting? CoreInsight is open source and welcoming
-                contributors, testers, and early users.
+
+            <div class="beta-footer-note">
+                <p style="margin-bottom:8px; font-size:13px; color:var(--muted);">
+                    Building something interesting? CoreInsight is open source and welcoming
+                    contributors, testers, and early users.
+                </p>
                 <a href="https://github.com/Prais3/coreinsight_cli" target="_blank"
-                   style="color:var(--green); text-decoration:none;">
+                   style="color:var(--green); text-decoration:none; font-size:13px; display:block;">
                     Open an issue or PR on GitHub →
                 </a>
-            </p>
-                <code style="color:var(--green)">coreinsight configure --pro-key &lt;your-key&gt;</code>
-            </p>
+            </div>
         </div>
     </div>
 </section>
@@ -1087,7 +1085,7 @@
             <li><a href="https://pypi.org/project/coreinsight-cli/" target="_blank">PyPI</a></li>
             <li><a href="https://tally.so/r/xXZ9YE" target="_blank">Get Pro</a></li>
         </ul>
-        <div class="footer-right">Open core · local-first · v0.2.8</div>
+        <div class="footer-right">Open core · local-first · v0.3.0</div>
     </div>
 </footer>
 
