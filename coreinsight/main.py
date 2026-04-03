@@ -82,9 +82,10 @@ def _run_single_agent(
     Original single-agent pipeline.
     Returns (result, optimized_code, success, logs, plot_data, is_valid).
     """
+    # JSON analysis phase — suppress token stream (raw JSON fragments are
+    # unreadable). Progress is shown via _log() lines instead.
     result = agent.analyze(
         original_code, language, context=context, hardware_target=hardware_target,
-        stream_callback=stream_callback,
     )
 
     if result.get("severity") == "Error":
@@ -149,10 +150,10 @@ def _run_multi_agent(
     import concurrent.futures as _cf
 
     # Step 1: bottleneck analysis
+    # JSON analysis phase — suppress token stream, same rationale as single-agent.
     result = multi_agents["bottleneck"].analyze(
         original_code, language,
         context=context, hardware_target=hardware_target,
-        stream_callback=stream_callback,
     )
     if result.get("severity") == "Error":
         return None, None, False, result.get("issue", "Unknown error"), None, False
@@ -160,10 +161,11 @@ def _run_multi_agent(
         return result, None, False, "", None, False
 
     # Step 2: optimized code generation
+    # Code generation phase — stream is useful here, output is readable code.
     optimized_code = multi_agents["optimizer"].generate(
         func_name, original_code, result,
         language, context, hardware_target,
-        stream_callback=stream_callback,
+        stream_callback=stream_callback,  # readable code, stream it
     )
     if not optimized_code or optimized_code == original_code:
         return result, None, False, "", None, False
@@ -649,8 +651,7 @@ def run_analysis(file_path: str, no_docker: bool = False, tui_console=None, stre
         max_fn = tier_limits["max_functions"]
         if max_fn is not None and len(functions) > max_fn:
             console.print(
-                f"[yellow]⚠ Free tier: analysing the first {max_fn} of {len(functions)} functions. "
-                f"Upgrade to Pro for unlimited → [cyan underline]{PRO_WAITLIST_URL}[/cyan underline][/yellow]"
+                f"[yellow]⚠ Analysing the first {max_fn} of {len(functions)} functions.[/yellow]"
             )
             functions = functions[:max_fn]
 
@@ -893,7 +894,7 @@ def _run_memory_cmd(clear: bool, export_path: str = None, export_fmt: str = "csv
             console.print("[red]Could not open memory store.[/red]")
             return
 
-        all_records = mem._collection.get(include=["metadatas", "ids"])
+        all_records = mem._collection.get(include=["metadatas"])
         metadatas   = all_records.get("metadatas", []) or []
         ids         = all_records.get("ids",       []) or []
     except Exception as exc:
