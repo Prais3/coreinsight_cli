@@ -36,7 +36,7 @@ from coreinsight.config import (
     is_pro,
     get_tier_limits,
     PRO_WAITLIST_URL,
-)
+)9*96+96
 from coreinsight.memory import OptimizationMemory
 
 # ---------------------------------------------------------------------------
@@ -778,19 +778,15 @@ class CoreInsightApp(App):
             log.write,
             "\n[bold cyan]Running built-in Python demo...[/bold cyan]\n"
         )
-
-        # Temporarily patch the demo's console output into the TUI
-        import coreinsight.main as _main
-        _prev = _main.console
-        _main.console = tui_console
         try:
-            run_demo(lang="python", no_docker=no_docker)
+            # Pass tui_console directly — run_demo forwards it to run_analysis
+            # which handles the global console swap cleanly via try/finally
+            run_demo(lang="python", no_docker=no_docker, tui_console=tui_console)
         except SystemExit:
             pass
         except Exception as exc:
             self.call_from_thread(log.write, f"[red]Demo error: {exc}[/red]")
         finally:
-            _main.console = _prev
             self._busy = False
             self.call_from_thread(self._set_status, "Demo complete.")
 
