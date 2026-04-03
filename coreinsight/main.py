@@ -741,7 +741,7 @@ def run_analysis(file_path: str, no_docker: bool = False, tui_console=None):
     finally:
         console = _prev_console
 
-def run_demo(lang: str = "python", no_docker: bool = False):
+def run_demo(lang: str = "python", no_docker: bool = False, tui_console=None):
     import shutil
     import importlib.resources
 
@@ -804,11 +804,16 @@ def run_demo(lang: str = "python", no_docker: bool = False):
     # For Python: auto-index so RAG cross-file context is showcased
     if lang == "python":
         console.print("[dim]Auto-indexing demo files to showcase RAG cross-file context...[/dim]")
-        from coreinsight.indexer import RepoIndexer as _RepoIndexer
-        _RepoIndexer(str(demo_dir)).index_repository()
+        try:
+            from coreinsight.indexer import RepoIndexer as _RepoIndexer
+            _RepoIndexer(str(demo_dir)).index_repository()
+        except Exception as _idx_err:
+            # Non-fatal — SQLite write conflicts can occur when running
+            # through the TUI. RAG context will be empty for this run.
+            console.print(f"[dim yellow]Indexing skipped (will retry next run): {_idx_err}[/dim yellow]")
         console.print()
 
-    run_analysis(str(demo_dir / entry_file), no_docker=no_docker)
+    run_analysis(str(demo_dir / entry_file), no_docker=no_docker, tui_console=tui_console)
 
 def _run_memory_cmd(clear: bool, export_path: str = None, export_fmt: str = "csv"):
     from coreinsight.memory import OptimizationMemory, MEMORY_DIR

@@ -18,9 +18,11 @@ SANDBOX_IMAGES = {
     "cpp":    "coreinsight-cpp-sandbox:latest",
 }
 
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
 DOCKERFILES = {
-    "python": "Dockerfile.python-sandbox",
-    "cpp":    "Dockerfile.cpp-sandbox",
+    "python": os.path.join(ROOT_DIR, "docker", "Dockerfile.python-sandbox"),
+    "cpp":    os.path.join(ROOT_DIR, "docker", "Dockerfile.cpp-sandbox"),
 }
 
 # ---------------------------------------------------------------------------
@@ -188,17 +190,21 @@ class CodeSandbox:
         label = "Python" if lang == "python" else "C++"
         console.print(f"[yellow]First run: building {label} sandbox image (one-time, ~30s)...[/yellow]")
 
-        dockerfile_path = importlib.resources.files("coreinsight").joinpath(DOCKERFILES[lang])
-        with importlib.resources.as_file(dockerfile_path) as dockerfile:
-            _, logs = self.client.images.build(
-                path=str(dockerfile.parent),
-                dockerfile=dockerfile.name,
-                tag=SANDBOX_IMAGES[lang],
-                rm=True,
+        dockerfile_full = DOCKERFILES[lang]
+        if not os.path.exists(dockerfile_full):
+            raise FileNotFoundError(
+                f"Dockerfile not found at {dockerfile_full}. "
+                f"Expected docker/ directory at project root."
             )
-            for chunk in logs:
-                if "stream" in chunk:
-                    logger.debug(chunk["stream"].strip())
+        _, logs = self.client.images.build(
+            path=os.path.dirname(dockerfile_full),
+            dockerfile=os.path.basename(dockerfile_full),
+            tag=SANDBOX_IMAGES[lang],
+            rm=True,
+        )
+        for chunk in logs:
+            if "stream" in chunk:
+                logger.debug(chunk["stream"].strip())
 
         console.print(f"[green]✓ {label} sandbox image built successfully.[/green]")
 

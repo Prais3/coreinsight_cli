@@ -805,7 +805,9 @@ class HarnessAgent:
             is_valid = self._check_speedup(success, logs)
             retries += 1
 
-        if is_valid and retries > 0:
+        if getattr(sandbox, 'disabled', False):
+            pass  # skipped intentionally — don't annotate as failed
+        elif is_valid and retries > 0:
             logs = f"(Succeeded after {retries} retries)\n" + logs
         elif not is_valid:
             logs    = f"(Failed after {retries} retries)\n" + logs
