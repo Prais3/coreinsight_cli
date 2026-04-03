@@ -21,12 +21,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from coreinsight.embeddings import load_embedding_fn
+
 logger = logging.getLogger(__name__)
 
 MEMORY_DIR  = Path.home() / ".coreinsight" / "memory_db"
 CODE_DIR    = MEMORY_DIR / "code"
 COLLECTION  = "optimization_memory"
-EMBED_MODEL = "all-MiniLM-L6-v2"   # same model as RepoIndexer — no extra download
 
 # ChromaDB uses cosine *distance* (lower = more similar).
 # 0.15 distance ≈ 0.85 cosine similarity for this embedding model.
@@ -54,17 +55,19 @@ class OptimizationMemory:
     Local vector database of verified optimizations.
 
     Reads are thread-safe (ChromaDB handles concurrent queries).
-    Writes are called from the main thread after each future completes,
-    so no write contention across worker threads.
+    Writes are serialized via _write_lock since store() can be called
+    from concurrent threads in process_function's as_completed loop.
     """
 
     def __init__(self, memory_dir: Path = MEMORY_DIR) -> None:
-        self._memory_dir = memory_dir
-        self._code_dir   = memory_dir / "code"
-        self._client     = None
-        self._collection = None
-        self._embed_fn   = None
-        self._init_error = ""
+        import threading
+        self._memory_dir  = memory_dir
+        self._code_dir    = memory_dir / "code"
+        self._client      = None
+        self._collection  = None
+        self._embed_fn    = None
+        self._init_error  = ""
+        self._write_lock  = threading.Lock()
 
     # ------------------------------------------------------------------ #
     # Lazy init — avoids slow import at startup
@@ -78,13 +81,11 @@ class OptimizationMemory:
         try:
             try:
                 import chromadb
-                from chromadb.utils import embedding_functions
             except Exception as sqlite_exc:
                 self._init_error = (
                     f"ChromaDB unavailable (likely outdated SQLite): {sqlite_exc}. "
                     "Optimization memory disabled. "
-                    "Fix: pip install pysqlite3-binary and add the following to the top of memory.py:\n"
-                    "  import pysqlite3, sys; sys.modules['sqlite3'] = pysqlite3"
+                    "Fix: pip install coreinsight-cli[compat]"
                 )
                 return False
 
@@ -92,9 +93,8 @@ class OptimizationMemory:
             self._code_dir.mkdir(parents=True, exist_ok=True)
 
             self._client = chromadb.PersistentClient(path=str(self._memory_dir))
-            self._embed_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
-                model_name=EMBED_MODEL
-            )
+            self._embed_fn, _embed_label = load_embedding_fn()
+            logger.debug(f"Memory embedder: {_embed_label}")
             self._collection = self._client.get_or_create_collection(
                 name=COLLECTION,
                 embedding_function=self._embed_fn,
@@ -273,52 +273,53 @@ class OptimizationMemory:
         """
         if not self._ensure_db():
             return False
-        try:
-            h           = self.ast_hash(original_code)
-            opt_code    = result.get("optimized_code", "") or ""
-            avg_speedup = 0.0
-            if verification.speedup.computed_speedups:
-                avg_speedup = (
-                    sum(verification.speedup.computed_speedups)
-                    / len(verification.speedup.computed_speedups)
+        with self._write_lock:
+            try:
+                h           = self.ast_hash(original_code)
+                opt_code    = result.get("optimized_code", "") or ""
+                avg_speedup = 0.0
+                if verification.speedup.computed_speedups:
+                    avg_speedup = (
+                        sum(verification.speedup.computed_speedups)
+                        / len(verification.speedup.computed_speedups)
+                    )
+
+                profiler_summary = ""
+                if profiler_result and profiler_result.available and profiler_result.metrics:
+                    parts = [
+                        f"{m.name}: {m.delta}"
+                        for m in profiler_result.metrics[:2]
+                    ]
+                    profiler_summary = " | ".join(parts)
+
+                self._save_code(h, language, opt_code)
+
+                meta = {
+                    "func_name":         func_name,
+                    "language":          language,
+                    "avg_speedup":       round(avg_speedup, 4),
+                    "issue":             (result.get("issue")     or "")[:500],
+                    "reasoning":         (result.get("reasoning") or "")[:1000],
+                    "severity":          result.get("severity", "High"),
+                    "correctness_cases": verification.correctness.passed_cases,
+                    "profiler_summary":  profiler_summary[:200],
+                    "timestamp":         datetime.now(timezone.utc).isoformat(),
+                }
+
+                self._collection.upsert(
+                    ids=[h],
+                    documents=[original_code],
+                    metadatas=[meta],
                 )
+                logger.info(
+                    f"Memory: stored '{func_name}' "
+                    f"(hash={h[:8]}…, speedup={avg_speedup:.2f}x)"
+                )
+                return True
 
-            profiler_summary = ""
-            if profiler_result and profiler_result.available and profiler_result.metrics:
-                parts = [
-                    f"{m.name}: {m.delta}"
-                    for m in profiler_result.metrics[:2]
-                ]
-                profiler_summary = " | ".join(parts)
-
-            self._save_code(h, language, opt_code)
-
-            meta = {
-                "func_name":         func_name,
-                "language":          language,
-                "avg_speedup":       round(avg_speedup, 4),
-                "issue":             (result.get("issue")     or "")[:500],
-                "reasoning":         (result.get("reasoning") or "")[:1000],
-                "severity":          result.get("severity", "High"),
-                "correctness_cases": verification.correctness.passed_cases,
-                "profiler_summary":  profiler_summary[:200],
-                "timestamp":         datetime.now(timezone.utc).isoformat(),
-            }
-
-            self._collection.upsert(
-                ids=[h],
-                documents=[original_code],
-                metadatas=[meta],
-            )
-            logger.info(
-                f"Memory: stored '{func_name}' "
-                f"(hash={h[:8]}…, speedup={avg_speedup:.2f}x)"
-            )
-            return True
-
-        except Exception as exc:
-            logger.debug(f"Memory store failed: {exc}")
-            return False
+            except Exception as exc:
+                logger.debug(f"Memory store failed: {exc}")
+                return False
 
     def stats(self) -> Dict[str, Any]:
         if not self._ensure_db():

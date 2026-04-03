@@ -156,6 +156,78 @@ def _fmt_int(n: int) -> str:
     return f"{n:,}"
 
 
+def _parse_nsys_stats(output: str) -> Dict[str, Any]:
+    """
+    Parse `nsys profile --stats=true` stdout into structured metrics.
+    Extracts kernel timing and memory throughput from the summary tables.
+    """
+    result: Dict[str, Any] = {}
+
+    # ── Kernel statistics ────────────────────────────────────────────────
+    # Header: Time(%)  Total Time (ns)  Instances  Avg (ns)  ...  Name
+    kernel_section = False
+    kernels = []
+    for line in output.splitlines():
+        if "CUDA Kernel Statistics" in line or "GPU Kernel Summary" in line:
+            kernel_section = True
+            continue
+        if kernel_section:
+            if line.strip() == "" or line.startswith("="):
+                if kernels:
+                    kernel_section = False
+                continue
+            # Skip header/separator lines
+            if "Time(%)" in line or "----" in line:
+                continue
+            parts = line.split()
+            if len(parts) >= 7:
+                try:
+                    kernels.append({
+                        "pct":       float(parts[0]),
+                        "total_ns":  float(parts[1].replace(",", "")),
+                        "instances": int(parts[2].replace(",", "")),
+                        "avg_ns":    float(parts[3].replace(",", "")),
+                        "name":      " ".join(parts[7:]) if len(parts) > 7 else parts[-1],
+                    })
+                except (ValueError, IndexError):
+                    continue
+
+    if kernels:
+        # Top kernel by total time
+        top = max(kernels, key=lambda k: k["total_ns"])
+        result["top_kernel_name"]     = top["name"]
+        result["top_kernel_avg_ns"]   = top["avg_ns"]
+        result["top_kernel_total_ns"] = top["total_ns"]
+        result["top_kernel_instances"]= top["instances"]
+        result["total_kernel_ns"]     = sum(k["total_ns"] for k in kernels)
+
+    # ── Memory throughput ────────────────────────────────────────────────
+    # Look for "Memory Throughput" or HtoD/DtoH transfer lines
+    mem_section = False
+    total_mem_ns = 0.0
+    for line in output.splitlines():
+        if "Memory Operation" in line or "Memory Throughput" in line:
+            mem_section = True
+            continue
+        if mem_section:
+            if line.strip() == "" or line.startswith("="):
+                mem_section = False
+                continue
+            if "Time(%)" in line or "----" in line:
+                continue
+            parts = line.split()
+            if len(parts) >= 3:
+                try:
+                    total_mem_ns += float(parts[1].replace(",", ""))
+                except (ValueError, IndexError):
+                    continue
+
+    if total_mem_ns:
+        result["total_mem_transfer_ns"] = total_mem_ns
+
+    return result
+
+
 def _parse_perf_stat(stderr: str) -> Dict[str, float]:
     """Extract hardware counter values from `perf stat` stderr output."""
     targets = {
@@ -284,7 +356,14 @@ class HardwareProfiler:
                     source_dir=source_dir,
                 )
             if language in ("cuda", "cu", "cuh"):
-                return self._profile_cuda(detected)
+                return self._profile_cuda(
+                    detected,
+                    original_code=original_code,
+                    optimized_code=optimized_code,
+                    func_name=func_name,
+                    original_file_content=original_file_content,
+                    source_dir=source_dir,
+                )
         except Exception as exc:
             logger.debug(f"HardwareProfiler.profile exception: {exc}", exc_info=True)
             return ProfilerResult(
@@ -710,17 +789,190 @@ class HardwareProfiler:
         return metrics or None
 
     # ------------------------------------------------------------------ #
-    # CUDA path (v0.2.0: nsys / nvprof)
+    # CUDA path — nsys CLI profiling
     # ------------------------------------------------------------------ #
 
-    def _profile_cuda(self, detected: Dict[str, bool]) -> ProfilerResult:
-        if detected.get("nsys"):
-            note = "nsys detected."
-        elif detected.get("nvprof"):
-            note = "nvprof detected."
-        else:
-            note = "No CUDA profiling tools found (install nsys from CUDA Toolkit)."
-        return ProfilerResult(
-            available=False, tool="none", language="cuda",
-            error=f"{note} CUDA profiling coming in v0.2.0.",
-        )
+    def _profile_cuda(
+        self,
+        detected:              Dict[str, bool],
+        original_code:         str = "",
+        optimized_code:        str = "",
+        func_name:             str = "",
+        original_file_content: str = "",
+        source_dir:            str = "",
+    ) -> ProfilerResult:
+        result = ProfilerResult(available=False, tool="nsys", language="cuda")
+
+        if not detected.get("nsys"):
+            if detected.get("nvprof"):
+                result.error = (
+                    "nvprof detected but not yet supported — install nsys "
+                    "from CUDA Toolkit 11.0+ for hardware profiling."
+                )
+            else:
+                result.error = (
+                    "No CUDA profiling tools found on PATH. "
+                    "Install nsys: https://developer.nvidia.com/nsight-systems"
+                )
+            return result
+
+        if not shutil.which("nvcc"):
+            result.error = "nvcc not found — required to compile CUDA sources for profiling."
+            return result
+
+        if not original_file_content:
+            result.error = "No CUDA source content available for profiling."
+            return result
+
+        stats_per_label: Dict[str, Dict[str, Any]] = {}
+
+        # Build optimized source by appending the optimized kernel —
+        # last __global__ definition with the same name wins at link time
+        # only if we can safely substitute; otherwise skip optimized run.
+        sources = [("original", original_file_content)]
+        if optimized_code and func_name:
+            opt_src = (
+                original_file_content.strip()
+                + "\n\n// --- CoreInsight optimized replacement ---\n"
+                + optimized_code.strip()
+            )
+            sources.append(("optimized", opt_src))
+
+        tmp = tempfile.mkdtemp()
+        try:
+            for label, src in sources:
+                src_path = os.path.join(tmp, f"{label}.cu")
+                bin_path = os.path.join(tmp, label)
+
+                with open(src_path, "w") as fh:
+                    fh.write(src)
+
+                # Compile
+                compile_proc = subprocess.run(
+                    ["nvcc", "-O3", "-arch=native", src_path, "-o", bin_path],
+                    capture_output=True, text=True, timeout=120,
+                )
+                if compile_proc.returncode != 0:
+                    # Try without -arch=native (older nvcc versions)
+                    compile_proc = subprocess.run(
+                        ["nvcc", "-O3", src_path, "-o", bin_path],
+                        capture_output=True, text=True, timeout=120,
+                    )
+                if compile_proc.returncode != 0:
+                    logger.debug(
+                        f"CUDA compile failed for {label}:\n"
+                        f"{compile_proc.stderr[:400]}"
+                    )
+                    result.error = (
+                        f"nvcc compilation failed for {label} version.\n"
+                        f"{compile_proc.stderr[:300]}"
+                    )
+                    return result
+
+                # Profile with nsys
+                nsys_out_base = os.path.join(tmp, f"nsys_{label}")
+                try:
+                    nsys_proc = subprocess.run(
+                        [
+                            "nsys", "profile",
+                            "--stats=true",
+                            "--force-overwrite=true",
+                            "-o", nsys_out_base,
+                            bin_path,
+                        ],
+                        capture_output=True, text=True, timeout=300,
+                    )
+                    # nsys writes stats to stdout; combined output in stderr too
+                    combined = nsys_proc.stdout + nsys_proc.stderr
+                    parsed   = _parse_nsys_stats(combined)
+
+                    if not parsed:
+                        logger.debug(
+                            f"nsys: no stats parsed for {label}.\n"
+                            f"nsys stdout: {nsys_proc.stdout[:300]}\n"
+                            f"nsys stderr: {nsys_proc.stderr[:300]}"
+                        )
+                        result.error = (
+                            f"nsys ran but produced no parseable stats for {label}. "
+                            f"Ensure the binary launches at least one CUDA kernel."
+                        )
+                        return result
+
+                    stats_per_label[label] = parsed
+
+                except subprocess.TimeoutExpired:
+                    result.error = "nsys profiling timed out (300s)."
+                    return result
+                except Exception as exc:
+                    result.error = f"nsys execution error: {exc}"
+                    return result
+
+        except Exception as exc:
+            logger.debug(f"CUDA profiling error: {exc}")
+            result.error = f"CUDA profiling failed: {exc}"
+            return result
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        if "original" not in stats_per_label:
+            result.error = "No profiling data collected."
+            return result
+
+        orig_s = stats_per_label["original"]
+        opt_s  = stats_per_label.get("optimized", orig_s)
+
+        metrics: List[ProfilerMetric] = []
+
+        # ── Kernel timing ─────────────────────────────────────────────
+        orig_ns = orig_s.get("top_kernel_avg_ns", 0.0)
+        opt_ns  = opt_s.get("top_kernel_avg_ns",  orig_ns)
+        if orig_ns:
+            metrics.append(ProfilerMetric(
+                name=f"Kernel avg time [{orig_s.get('top_kernel_name', 'top kernel')}]",
+                original=f"{orig_ns / 1000:.2f} µs",
+                optimized=f"{opt_ns / 1000:.2f} µs",
+                delta=_pct_delta(orig_ns, opt_ns),
+                note="lower is better",
+            ))
+
+        orig_total = orig_s.get("total_kernel_ns", 0.0)
+        opt_total  = opt_s.get("total_kernel_ns",  orig_total)
+        if orig_total:
+            metrics.append(ProfilerMetric(
+                name="Total kernel time",
+                original=f"{orig_total / 1e6:.3f} ms",
+                optimized=f"{opt_total / 1e6:.3f} ms",
+                delta=_pct_delta(orig_total, opt_total),
+                note="lower is better",
+            ))
+
+        orig_inst = orig_s.get("top_kernel_instances", 0)
+        if orig_inst:
+            metrics.append(ProfilerMetric(
+                name="Kernel launches",
+                original=str(orig_inst),
+                optimized=str(opt_s.get("top_kernel_instances", orig_inst)),
+                delta="—",
+                note="",
+            ))
+
+        # ── Memory transfers ──────────────────────────────────────────
+        orig_mem = orig_s.get("total_mem_transfer_ns", 0.0)
+        opt_mem  = opt_s.get("total_mem_transfer_ns",  orig_mem)
+        if orig_mem:
+            metrics.append(ProfilerMetric(
+                name="Total memory transfer time",
+                original=f"{orig_mem / 1e6:.3f} ms",
+                optimized=f"{opt_mem / 1e6:.3f} ms",
+                delta=_pct_delta(orig_mem, opt_mem),
+                note="lower is better",
+            ))
+
+        if not metrics:
+            result.error = "nsys ran but no timing metrics could be extracted."
+            return result
+
+        result.available        = True
+        result.host_tool_name   = "nsys"
+        result.host_tool_metrics = metrics
+        return result

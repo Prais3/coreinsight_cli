@@ -9,61 +9,10 @@ import chromadb
 from chromadb.utils import embedding_functions
 
 from coreinsight.parser import CodeParser
+from coreinsight.embeddings import load_embedding_fn
 
 console = Console()
 logger  = logging.getLogger(__name__)
-
-# Local model cache — never hits the network if model is already here
-_MODEL_CACHE_DIR = Path.home() / ".coreinsight" / "models"
-
-
-class _HashEmbeddingFunction:
-    """
-    Deterministic offline fallback embedder.
-    Produces a 384-dim float vector from token overlap — no downloads, no GPU.
-    Semantic quality is lower than MiniLM but RAG still works via keyword matching.
-    """
-    DIM = 384
-
-    def __call__(self, input: list[str]) -> list[list[float]]:
-        results = []
-        for text in input:
-            tokens = text.lower().split()
-            vec    = [0.0] * self.DIM
-            for tok in tokens:
-                h = int(hashlib.sha256(tok.encode()).hexdigest(), 16)
-                vec[h % self.DIM] += 1.0
-            # L2 normalise
-            mag = math.sqrt(sum(x * x for x in vec)) or 1.0
-            results.append([x / mag for x in vec])
-        return results
-
-
-def _load_embedding_fn():
-    """
-    Try to load SentenceTransformer from local cache.
-    Falls back to _HashEmbeddingFunction if offline or model not cached.
-    """
-    _MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    os.environ.setdefault("SENTENCE_TRANSFORMERS_HOME", str(_MODEL_CACHE_DIR))
-    os.environ.setdefault("HF_HUB_OFFLINE", "0")  # allow download when online
-
-    try:
-        fn = embedding_functions.SentenceTransformerEmbeddingFunction(
-            model_name="all-MiniLM-L6-v2",
-        )
-        # Probe: actually load the model now so we catch network errors here
-        # rather than silently later during indexing.
-        fn(["probe"])
-        return fn, "all-MiniLM-L6-v2 (cached)"
-    except Exception as e:
-        logger.warning(f"SentenceTransformer unavailable ({e}). Using offline hash embedder — semantic quality reduced.")
-        console.print(
-            "[yellow]⚠  Embedding model unavailable (offline or not yet downloaded). "
-            "Using keyword-based fallback — RAG will work but with reduced semantic accuracy. "
-            "Run [cyan]coreinsight index[/cyan] once while online to cache the model.[/yellow]"
-        )
-        return _HashEmbeddingFunction(), "hash-based (offline fallback)"
 
 
 class RepoIndexer:
@@ -82,7 +31,7 @@ class RepoIndexer:
             return True
         try:
             self._chroma_client   = chromadb.PersistentClient(path=str(self.db_path))
-            self._embedding_fn, self._embedding_label = _load_embedding_fn()
+            self._embedding_fn, self._embedding_label = load_embedding_fn()
             self._collection      = self._chroma_client.get_or_create_collection(
                 name="codebase_context",
                 embedding_function=self._embedding_fn,
