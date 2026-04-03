@@ -47,6 +47,8 @@ class MemoryHit:
     language:          str
     severity:          str = "High"
     correctness_cases: int = 0
+    total_cases:       int = 0
+    test_cases:        list = field(default_factory=list)
     profiler_summary:  str = ""
 
 
@@ -302,6 +304,7 @@ class OptimizationMemory:
                     "reasoning":         (result.get("reasoning") or "")[:1000],
                     "severity":          result.get("severity", "High"),
                     "correctness_cases": verification.correctness.passed_cases,
+                    "total_cases":       verification.correctness.total_cases,
                     "profiler_summary":  profiler_summary[:200],
                     "timestamp":         datetime.now(timezone.utc).isoformat(),
                 }
@@ -329,9 +332,76 @@ class OptimizationMemory:
         except Exception as exc:
             return {"count": 0, "error": str(exc)}
 
+    def store_test_cases(self, original_code: str, test_cases: list) -> None:
+        """
+        Persist test cases for a function, keyed by AST hash.
+        Called from process_function immediately after test cases are generated,
+        so `coreinsight test` can re-run verification without the LLM.
+        """
+        if not self._ensure_db():
+            return
+        h = self.ast_hash(original_code)
+        with self._write_lock:
+            try:
+                self._code_dir.mkdir(parents=True, exist_ok=True)
+                self._save_test_cases(h, test_cases)
+            except Exception as exc:
+                logger.debug(f"store_test_cases failed: {exc}")
+
+    def lookup_by_name(self, func_name: str) -> Optional[dict]:
+        """
+        Find the most recent memory record whose func_name matches exactly.
+        Returns a dict with keys: func_name, language, original_code,
+        optimized_code, test_cases, meta. Returns None on no match.
+        """
+        if not self._ensure_db():
+            return None
+        try:
+            all_records = self._collection.get(
+                include=["metadatas", "documents"]
+            )
+            matches = [
+                (meta, doc, rid)
+                for meta, doc, rid in zip(
+                    all_records.get("metadatas", []),
+                    all_records.get("documents", []),
+                    all_records.get("ids", []),
+                )
+                if meta.get("func_name") == func_name
+            ]
+            if not matches:
+                return None
+            # Most recent first
+            matches.sort(key=lambda x: x[0].get("timestamp", ""), reverse=True)
+            meta, original_code, h = matches[0]
+            return {
+                "func_name":      func_name,
+                "language":       meta.get("language", ""),
+                "original_code":  original_code or "",
+                "optimized_code": self._load_code(h) or "",
+                "test_cases":     self._load_test_cases(h) or [],
+                "meta":           meta,
+            }
+        except Exception as exc:
+            logger.debug(f"lookup_by_name failed: {exc}")
+            return None
+
     # ------------------------------------------------------------------ #
     # Internal helpers
     # ------------------------------------------------------------------ #
+
+    def _save_test_cases(self, h: str, cases: list) -> None:
+        path = self._code_dir / f"{h}.test_cases.json"
+        path.write_text(json.dumps(cases), encoding="utf-8")
+
+    def _load_test_cases(self, h: str) -> Optional[list]:
+        path = self._code_dir / f"{h}.test_cases.json"
+        if not path.exists():
+            return None
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
 
     def _save_code(self, h: str, language: str, code: str) -> None:
         ext  = {"python": "py", "cpp": "cpp", "c++": "cpp", "cuda": "cu"}.get(language, "txt")
@@ -364,5 +434,6 @@ class OptimizationMemory:
             language=          meta.get("language",          ""),
             severity=          meta.get("severity",          "High"),
             correctness_cases= int(meta.get("correctness_cases", 0)),
+            total_cases=       int(meta.get("total_cases",       0)),
             profiler_summary=  meta.get("profiler_summary",  ""),
         )

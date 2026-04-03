@@ -312,6 +312,45 @@ class CodeSandbox:
         )
         return VerificationResult(speedup=speedup_result, correctness=correctness_result)
 
+    def verify_correctness_only(
+        self,
+        original_code:       str,
+        optimized_code:      str,
+        original_func_name:  str,
+        optimized_func_name: str,
+        test_cases:          List[Dict[str, Any]],
+        language:            str = "python",
+        timeout_seconds:     int = 60,
+        context:             str = "",
+    ) -> CorrectnessVerification:
+        """
+        Re-run correctness sandbox only — no speedup check, no LLM.
+        Used by `coreinsight test <function_name>`.
+
+        C++ and CUDA are not supported: their correctness harness is a
+        main() block embedded by HarnessAgent at analysis time and cannot
+        be reconstructed from stored test cases alone.
+        """
+        if self.disabled:
+            return CorrectnessVerification(verified=False, details=SANDBOX_SKIPPED_MSG)
+        if not self.client:
+            return CorrectnessVerification(verified=False, details="Docker unavailable.")
+        if language in ("cpp", "c++", "cuda"):
+            return CorrectnessVerification(
+                verified=False,
+                details=(
+                    f"Re-verification not supported for {language}: "
+                    "correctness harness is embedded at analysis time. "
+                    "See stored pass rate in `coreinsight memory`."
+                ),
+            )
+        return self._verify_correctness(
+            original_code, optimized_code,
+            original_func_name, optimized_func_name,
+            test_cases, language, timeout_seconds,
+            context=context,
+        )
+
     def _verify_speedup(self, csv_output: str) -> SpeedupVerification:
         result = SpeedupVerification(verified=False)
         try:
