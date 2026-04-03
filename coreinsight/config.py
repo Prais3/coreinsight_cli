@@ -1,4 +1,6 @@
 import json
+import hashlib
+import urllib
 from pathlib import Path
 from rich.console import Console
 from rich.prompt import Prompt, Confirm
@@ -8,17 +10,17 @@ CONFIG_FILE = Path.home() / ".coreinsight" / "config.json"
 
 PRO_WAITLIST_URL = "https://tally.so/r/xXZ9YE"
 
-# Raw URL of GitHub Gist - beta testing for new pro users
-PRO_KEYS_GIST_URL = "https://gist.githubusercontent.com/Prais3/4a57cf927734c6678602ff2066fc080c/raw/b4347c6ffea869490afb9a828802ec882ecd0eca/valid_keys.json"
+# Cloudflare Worker endpoint for Pro key validation (v0.3.0+)
+PRO_KEY_VALIDATION_URL = "https://coreinsight.coreinsight-dev.workers.dev/"
 
 CLOUD_PROVIDERS = ["openai", "anthropic", "google"]
 
 FREE_TIER_LIMITS = {
-    "max_functions":     3,
-    "max_retries":       2,
-    "num_test_cases":    8,
+    "max_functions":      None,  # unlimited
+    "max_retries":        3,
+    "num_test_cases":     5,
     "hardware_profiling": False,
-    "max_files": 2,
+    "max_files":          None,
 }
 
 PRO_TIER_LIMITS = {
@@ -106,11 +108,20 @@ def run_configure(pro_key: str = None, agent_mode: str = None):
         key_hash = hashlib.sha256(pro_key.encode()).hexdigest()
 
         try:
-            req = urllib.request.Request(PRO_KEYS_GIST_URL)
-            with urllib.request.urlopen(req, timeout=5) as response:
-                valid_hashes = json.loads(response.read().decode())
-            
-            if key_hash in valid_hashes:
+            payload = json.dumps({"hash": key_hash}).encode()
+            req = urllib.request.Request(
+                PRO_KEY_VALIDATION_URL,
+                data=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "User-Agent": "coreinsight-cli/0.3.0",
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=8) as response:
+                result = json.loads(response.read().decode())
+
+            if result.get("valid"):
                 config["pro"] = True
                 save_config(config)
                 console.print("[bold green]✅ Pro tier activated![/bold green]")
@@ -118,8 +129,11 @@ def run_configure(pro_key: str = None, agent_mode: str = None):
                 config["pro"] = False
                 save_config(config)
                 console.print("[red]❌ Invalid or revoked Pro key.[/red]")
-        except Exception as e:
-            console.print("[red]⚠️ Could not verify key. Please check your internet connection or try again later.[/red]")
+        except Exception:
+            console.print(
+                "[red]⚠️ Could not verify key — check your internet connection "
+                "or try again later.[/red]"
+            )
         return
 
     if agent_mode is not None:
