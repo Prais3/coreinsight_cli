@@ -296,6 +296,7 @@ class CodeSandbox:
         test_cases: List[Dict[str, Any]],
         language: str = "python",
         timeout_seconds: int = 60,
+        context: str = "",
     ) -> VerificationResult:
         if self.disabled:
             return VerificationResult(
@@ -307,6 +308,7 @@ class CodeSandbox:
             original_code, optimized_code,
             original_func_name, optimized_func_name,
             test_cases, language, timeout_seconds,
+            context=context,
         )
         return VerificationResult(speedup=speedup_result, correctness=correctness_result)
 
@@ -423,6 +425,7 @@ class CodeSandbox:
         test_cases: List[Dict[str, Any]],
         language: str,
         timeout_seconds: int,
+        context: str = "",
     ) -> CorrectnessVerification:
         if not self.client:
             return CorrectnessVerification(verified=False, details="Docker unavailable.")
@@ -430,11 +433,13 @@ class CodeSandbox:
             return CorrectnessVerification(verified=False, details="No test cases provided — skipping correctness check.")
         if language == "python":
             return self._correctness_python(
-                original_code, optimized_code, original_func_name, optimized_func_name, test_cases, timeout_seconds
+                original_code, optimized_code, original_func_name, optimized_func_name,
+                test_cases, timeout_seconds, context=context,
             )
         if language in ["cpp", "c++"]:
             return self._correctness_cpp(
-                original_code, optimized_code, original_func_name, optimized_func_name, test_cases, timeout_seconds
+                original_code, optimized_code, original_func_name, optimized_func_name,
+                test_cases, timeout_seconds, context=context,
             )
         return CorrectnessVerification(verified=False, details=f"Correctness not implemented for '{language}'.")
 
@@ -446,9 +451,20 @@ class CodeSandbox:
         optimized_func_name: str,
         test_cases: List[Dict[str, Any]],
         timeout_seconds: int,
+        context: str = "",
     ) -> CorrectnessVerification:
+        # Prepend RAG context (helper functions / imports the target function
+        # depends on) so the verification container has everything it needs.
+        # Without this, any cross-function dependency causes a NameError and
+        # every test case fails despite the optimization being correct.
+        context_block = (
+            "# === context (helper functions) ===\n" + context.strip() + "\n\n"
+            if context and context.strip()
+            else ""
+        )
         merged = (
-            "# === original ===\n" + original_code.strip()
+            context_block
+            + "# === original ===\n" + original_code.strip()
             + "\n\n# === optimized ===\n" + optimized_code.strip() + "\n"
         )
         harness = _PYTHON_CORRECTNESS_HARNESS.format(
@@ -535,8 +551,20 @@ class CodeSandbox:
         optimized_func_name: str,
         test_cases: List[Dict[str, Any]],
         timeout_seconds: int,
+        context: str = "",
     ) -> CorrectnessVerification:
-        merged = optimized_code.strip()
+        # Same rationale as Python path — C++ functions frequently depend on
+        # structs or helpers defined elsewhere in the file.
+        # RAG context may contain C++-style metadata headers ("// From file.py")
+        # which are syntax errors in Python. Rewrite them as # comments.
+        import re as _re
+        safe_context = _re.sub(r"^//", "#", context.strip(), flags=_re.MULTILINE)
+        context_block = (
+            "# === context (helper functions) ===\n" + safe_context + "\n\n"
+            if safe_context
+            else ""
+        )
+        merged = context_block + optimized_code.strip()
         with tempfile.TemporaryDirectory() as temp_dir:
             os.chmod(temp_dir, 0o777)
             for fname, content in [

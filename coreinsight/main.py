@@ -21,6 +21,7 @@ import concurrent.futures
 import threading
 import urllib.request
 import urllib.error
+from typing import Callable, Optional
 from pathlib import Path
 from rich.console import Console
 from rich.markdown import Markdown
@@ -75,12 +76,17 @@ def _check_speedup_success(success: bool, logs: str) -> bool:
 def _run_single_agent(
     func_name, original_code, language, context,
     hardware_target, sandbox, agent, tier_limits,
+    stream_callback: Optional[Callable[[str], None]] = None,
 ):
     """
     Original single-agent pipeline.
     Returns (result, optimized_code, success, logs, plot_data, is_valid).
     """
-    result = agent.analyze(original_code, language, context=context, hardware_target=hardware_target)
+    # JSON analysis phase — suppress token stream (raw JSON fragments are
+    # unreadable). Progress is shown via _log() lines instead.
+    result = agent.analyze(
+        original_code, language, context=context, hardware_target=hardware_target,
+    )
 
     if result.get("severity") == "Error":
         return None, None, False, result.get("issue", "Unknown error"), None, False
@@ -92,6 +98,7 @@ def _run_single_agent(
     harness_code   = agent.generate_harness(
         func_name, original_code, optimized_code,
         language, context, hardware_target=hardware_target,
+        stream_callback=stream_callback,
     )
     success, logs, plot_data = sandbox.execute_benchmark(harness_code, language)
 
@@ -108,7 +115,10 @@ def _run_single_agent(
                 error_hint = "\nERROR: Script ran but DID NOT print the CSV table. You MUST print the strict CSV format."
             else:
                 error_hint = "\nERROR: Optimized code was SLOWER. Rewrite to be faster."
-        harness_code             = agent.fix_harness(func_name, original_code, harness_code, logs + error_hint, language, context=context)
+        harness_code             = agent.fix_harness(
+            func_name, original_code, harness_code, logs + error_hint, language, context=context,
+            stream_callback=stream_callback,
+        )
         success, logs, plot_data = sandbox.execute_benchmark(harness_code, language)
         is_valid                 = _check_speedup_success(success, logs)
         retry_count             += 1
@@ -127,6 +137,7 @@ def _run_single_agent(
 def _run_multi_agent(
     func_name, original_code, language, context,
     hardware_target, sandbox, multi_agents, tier_limits,
+    stream_callback: Optional[Callable[[str], None]] = None,
 ):
     """
     Multi-agent pipeline.
@@ -139,6 +150,7 @@ def _run_multi_agent(
     import concurrent.futures as _cf
 
     # Step 1: bottleneck analysis
+    # JSON analysis phase — suppress token stream, same rationale as single-agent.
     result = multi_agents["bottleneck"].analyze(
         original_code, language,
         context=context, hardware_target=hardware_target,
@@ -149,9 +161,11 @@ def _run_multi_agent(
         return result, None, False, "", None, False
 
     # Step 2: optimized code generation
+    # Code generation phase — stream is useful here, output is readable code.
     optimized_code = multi_agents["optimizer"].generate(
         func_name, original_code, result,
         language, context, hardware_target,
+        stream_callback=stream_callback,  # readable code, stream it
     )
     if not optimized_code or optimized_code == original_code:
         return result, None, False, "", None, False
@@ -185,7 +199,7 @@ def _run_multi_agent(
 
     return result, optimized_code, success, logs, plot_data, is_valid
 
-def process_function(func: dict, language: str, agent: AnalyzerAgent, sandbox: CodeSandbox, indexer: RepoIndexer, hardware_target: str, tier_limits: dict, profiler=None, file_content: str = "", source_dir: str = "", memory=None, agent_mode: str = "single", multi_agents: dict = None):
+def process_function(func: dict, language: str, agent: AnalyzerAgent, sandbox: CodeSandbox, indexer: RepoIndexer, hardware_target: str, tier_limits: dict, profiler=None, file_content: str = "", source_dir: str = "", memory=None, agent_mode: str = "single", multi_agents: dict = None, stream_callback: Optional[Callable[[str], None]] = None):
     """Worker function to analyze and benchmark a single code kernel."""
     func_name     = func['name']
     original_code = func['code']
@@ -217,12 +231,14 @@ def process_function(func: dict, language: str, agent: AnalyzerAgent, sandbox: C
                 _run_multi_agent(
                     func_name, original_code, language, context,
                     hardware_target, sandbox, multi_agents, tier_limits,
+                    stream_callback=stream_callback,
                 )
         else:
             result, optimized_code, success, logs, plot_data, is_valid_optimization = \
                 _run_single_agent(
                     func_name, original_code, language, context,
                     hardware_target, sandbox, agent, tier_limits,
+                    stream_callback=stream_callback,
                 )
 
         if result is None:
@@ -253,6 +269,7 @@ def process_function(func: dict, language: str, agent: AnalyzerAgent, sandbox: C
                 optimized_func_name=func_name,
                 test_cases=test_cases,
                 language=language,
+                context=context,
             )
 
             # AI-free hardware profiling (pro-gated)
@@ -569,13 +586,35 @@ def _preflight_checks(provider: str, model_name: str, no_docker: bool = False) -
 
     return True
 
-def run_analysis(file_path: str, no_docker: bool = False, tui_console=None):
+def run_analysis(file_path: str, no_docker: bool = False, tui_console=None, stream_callback: Optional[Callable[[str], None]] = None):
     global console
     _prev_console = console
     
     if tui_console is not None:
         console = tui_console
-    
+        
+    # CLI path: stream raw tokens to stdout so the cursor stays alive
+    if stream_callback is None and tui_console is None:
+        def _cli_stream(token: str):
+            sys.stdout.write(token)
+            sys.stdout.flush()
+        stream_callback = _cli_stream
+
+    # TUI path: write tokens as Rich Text objects (never markup-parsed).
+    # Raw JSON fragments from streaming would corrupt the Rich parser if
+    # passed as markup strings — Text(style="dim") is always safe.
+    elif stream_callback is None and tui_console is not None:
+        from rich.text import Text as _Text
+        from rich.markup import escape as _escape
+        def _tui_stream(token: str):
+            try:
+                # Escape raw LLM tokens — they may contain brackets or
+                # markdown that would corrupt the Rich markup parser.
+                tui_console.print(_Text(_escape(token), style="dim"))
+            except Exception:
+                pass
+        stream_callback = _tui_stream
+
     try:
         path = Path(file_path)
         if not path.exists() or not path.is_file():
@@ -615,8 +654,7 @@ def run_analysis(file_path: str, no_docker: bool = False, tui_console=None):
         max_fn = tier_limits["max_functions"]
         if max_fn is not None and len(functions) > max_fn:
             console.print(
-                f"[yellow]⚠ Free tier: analysing the first {max_fn} of {len(functions)} functions. "
-                f"Upgrade to Pro for unlimited → [cyan underline]{PRO_WAITLIST_URL}[/cyan underline][/yellow]"
+                f"[yellow]⚠ Analysing the first {max_fn} of {len(functions)} functions.[/yellow]"
             )
             functions = functions[:max_fn]
 
@@ -677,7 +715,7 @@ def run_analysis(file_path: str, no_docker: bool = False, tui_console=None):
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             # Submit all functions to the thread pool
             future_to_func = {
-                executor.submit(process_function, func, language, agent, sandbox, indexer, hardware_target_str, tier_limits, profiler, file_content, str(path.parent), memory, agent_mode, multi_agents): func
+                executor.submit(process_function, func, language, agent, sandbox, indexer, hardware_target_str, tier_limits, profiler, file_content, str(path.parent), memory, agent_mode, multi_agents, stream_callback): func
                 for func in functions
             }
 
@@ -859,7 +897,7 @@ def _run_memory_cmd(clear: bool, export_path: str = None, export_fmt: str = "csv
             console.print("[red]Could not open memory store.[/red]")
             return
 
-        all_records = mem._collection.get(include=["metadatas", "ids"])
+        all_records = mem._collection.get(include=["metadatas"])
         metadatas   = all_records.get("metadatas", []) or []
         ids         = all_records.get("ids",       []) or []
     except Exception as exc:

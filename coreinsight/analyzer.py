@@ -1,6 +1,6 @@
 import re
 import logging
-from typing import Optional, List
+from typing import Callable, Optional, List
 from pydantic import BaseModel, Field
 
 from langchain_core.output_parsers import JsonOutputParser
@@ -44,6 +44,43 @@ def _is_truncated(raw: str) -> bool:
     return False
 
 logger = logging.getLogger(__name__)
+
+# -------------------------------------------------------------------------------------
+# Prompt compression - SMALL-tier models (≤7B) within their 4 096-token context budget.
+# -------------------------------------------------------------------------------------
+_SMALL_CONTEXT_CHAR_LIMIT = 1_200   # ~300 tokens — enough for signatures
+_SMALL_CODE_CHAR_LIMIT    = 2_000   # ~500 tokens — function body cap
+
+def _compress_for_small_model(
+    context: str,
+    code: str,
+    model_tier: str,
+) -> tuple:
+    """
+    Aggressively trims RAG context and target code for SMALL-tier models so
+    the entire prompt + format instructions + response fit within 4 096 tokens.
+    Returns (compressed_context, compressed_code). No-op for MEDIUM / LARGE.
+    """
+    from coreinsight.prompts import ModelTier
+    if model_tier != ModelTier.SMALL:
+        return context, code
+
+    if context and len(context) > _SMALL_CONTEXT_CHAR_LIMIT:
+        context = (
+            context[:_SMALL_CONTEXT_CHAR_LIMIT]
+            + "\n\n# [context truncated — top dependencies shown only]"
+        )
+
+    if code and len(code) > _SMALL_CODE_CHAR_LIMIT:
+        lines = code.splitlines()
+        kept  = lines[:60]
+        if len(lines) > 60:
+            kept.append(
+                f"# ... [{len(lines) - 60} lines truncated for small model]"
+            )
+        code = "\n".join(kept)
+
+    return context, code
 
 
 class Bottleneck(BaseModel):
@@ -255,30 +292,59 @@ class AnalyzerAgent:
         )
         self.chain = self.prompt | self.json_llm | self.parser
 
-    def analyze(self, code: str, language: str, context: str = "", hardware_target: str = "Generic CPU"):
+    def analyze(
+        self,
+        code: str,
+        language: str,
+        context: str = "",
+        hardware_target: str = "Generic CPU",
+        stream_callback: Optional[Callable[[str], None]] = None,
+    ):
+        context, code = _compress_for_small_model(context, code, self.model_tier)
         try:
+            if stream_callback is not None:
+                # Stream raw tokens → accumulate → parse at end.
+                # Keeps the cursor alive on slow local models instead of hanging.
+                raw_chain   = self.prompt | self.json_llm
+                accumulated = ""
+                for chunk in raw_chain.stream({
+                    "language":        language,
+                    "code_content":    code,
+                    "context":         context,
+                    "hardware_target": hardware_target,
+                }):
+                    token = chunk.content if hasattr(chunk, "content") else str(chunk)
+                    if isinstance(token, list):
+                        token = "".join(
+                            t.get("text", "") if isinstance(t, dict) else str(t)
+                            for t in token
+                        )
+                    if token:
+                        accumulated += token
+                        stream_callback(token)
+                return self.parser.parse(accumulated)
             return self.chain.invoke({
-                "language": language,
-                "code_content": code,
-                "context": context,
+                "language":        language,
+                "code_content":    code,
+                "context":         context,
                 "hardware_target": hardware_target,
             })
         except OutputParserException:
             return {
-                "severity": "Error",
-                "issue": "AI Output Parsing Failed",
-                "reasoning": "The model failed to return valid JSON.",
-                "suggestion": "Try running the analysis again or use a larger parameter model.",
-                "bottlenecks": [],
+                "severity":       "Error",
+                "issue":          "AI Output Parsing Failed",
+                "reasoning":      "The model failed to return valid JSON.",
+                "suggestion":     "Try running the analysis again or use a larger parameter model.",
+                "bottlenecks":    [],
                 "optimized_code": None,
             }
         except Exception as e:
             return {
-                "severity": "Error",
-                "issue": str(e),
-                "reasoning": "System error during analysis pipeline.",
-                "suggestion": "Check LLM API keys and connectivity.",
-                "bottlenecks": [],
+                "severity":       "Error",
+                "issue":          str(e),
+                "reasoning":      "System error during analysis pipeline.",
+                "suggestion":     "Check LLM API keys and connectivity.",
+                "bottlenecks":    [],
                 "optimized_code": None,
             }
 
@@ -296,11 +362,37 @@ class AnalyzerAgent:
             lines.pop(0)
         return "\n".join(lines).strip()
 
-    def _invoke_code_chain(self, template: str, variables: dict, language: str) -> str:
+    def _invoke_code_chain(
+        self,
+        template: str,
+        variables: dict,
+        language: str,
+        stream_callback: Optional[Callable[[str], None]] = None,
+    ) -> str:
         """Shared invocation + extraction logic for harness and fix chains."""
         chain = PromptTemplate.from_template(template) | self.base_llm
         try:
-            result = chain.invoke(variables)
+            if stream_callback is not None:
+                accumulated = ""
+                for chunk in chain.stream(variables):
+                    token = chunk.content if hasattr(chunk, "content") else str(chunk)
+                    if isinstance(token, list):
+                        token = "".join(
+                            t.get("text", "") if isinstance(t, dict) else str(t)
+                            for t in token
+                        )
+                    if token:
+                        accumulated += token
+                        stream_callback(token)
+                raw = accumulated
+            else:
+                result = chain.invoke(variables)
+                raw = result.content if hasattr(result, "content") else str(result)
+                if isinstance(raw, list):
+                    raw = "\n".join(
+                        item["text"] if isinstance(item, dict) and "text" in item else str(item)
+                        for item in raw
+                    )
         except Exception as e:
             err = str(e).lower()
             if any(h in err for h in _TRUNCATION_HINTS):
@@ -309,12 +401,6 @@ class AnalyzerAgent:
                     f"or a model with a larger context window. Detail: {e}"
                 ) from e
             raise
-        raw = result.content if hasattr(result, "content") else str(result)
-        if isinstance(raw, list):
-            raw = "\n".join(
-                item["text"] if isinstance(item, dict) and "text" in item else str(item)
-                for item in raw
-            )
         if _is_truncated(raw):
             logger.warning(
                 f"LLM output appears truncated (len={len(raw)}). "
@@ -334,21 +420,26 @@ class AnalyzerAgent:
         language: str,
         context: str = "",
         hardware_target: str = "Generic CPU",
+        stream_callback: Optional[Callable[[str], None]] = None,
     ) -> str:
         try:
+            context, original_code = _compress_for_small_model(
+                context, original_code, self.model_tier
+            )
             tiered_template = _HARNESS_TEMPLATE + HARNESS_ADDENDUM.get(self.model_tier, "")
-            
+
             return self._invoke_code_chain(
                 tiered_template,
                 {
-                    "language": language,
-                    "func_name": func_name,
-                    "original": original_code,
-                    "optimized": optimized_code,
-                    "context": context,
+                    "language":        language,
+                    "func_name":       func_name,
+                    "original":        original_code,
+                    "optimized":       optimized_code,
+                    "context":         context,
                     "hardware_target": hardware_target,
                 },
                 language,
+                stream_callback=stream_callback,
             )
         except Exception as e:
             is_python = language.lower() == "python"
@@ -365,21 +456,26 @@ class AnalyzerAgent:
         error_logs: str,
         language: str,
         context: str = "",
+        stream_callback: Optional[Callable[[str], None]] = None,
     ) -> str:
         try:
+            context, original_code = _compress_for_small_model(
+                context, original_code, self.model_tier
+            )
             tiered_template = _FIX_TEMPLATE + HARNESS_ADDENDUM.get(self.model_tier, "")
-            
+
             return self._invoke_code_chain(
                 tiered_template,
                 {
-                    "language": language,
-                    "func_name": func_name,
-                    "original": original_code,
-                    "bad_harness": bad_harness,
+                    "language":   language,
+                    "func_name":  func_name,
+                    "original":   original_code,
+                    "bad_harness":bad_harness,
                     "error_logs": error_logs,
-                    "context": context,
+                    "context":    context,
                 },
                 language,
+                stream_callback=stream_callback,
             )
         except Exception as e:
             is_python = language.lower() == "python"
@@ -577,8 +673,29 @@ class BottleneckAgent:
         language:        str,
         context:         str = "",
         hardware_target: str = "Generic CPU",
+        stream_callback: Optional[Callable[[str], None]] = None,
     ) -> dict:
+        context, code = _compress_for_small_model(context, code, self.model_tier)
         try:
+            if stream_callback is not None:
+                raw_chain   = self._prompt | self._json_llm
+                accumulated = ""
+                for chunk in raw_chain.stream({
+                    "language":        language,
+                    "code_content":    code,
+                    "context":         context,
+                    "hardware_target": hardware_target,
+                }):
+                    token = chunk.content if hasattr(chunk, "content") else str(chunk)
+                    if isinstance(token, list):
+                        token = "".join(
+                            t.get("text", "") if isinstance(t, dict) else str(t)
+                            for t in token
+                        )
+                    if token:
+                        accumulated += token
+                        stream_callback(token)
+                return self.parser.parse(accumulated)
             return self._chain.invoke({
                 "language":        language,
                 "code_content":    code,
@@ -651,6 +768,9 @@ class OptimizerAgent:
         Returns original_code on any failure so the pipeline can continue.
         """
         try:
+            context, original_code = _compress_for_small_model(
+                context or "", original_code, self.model_tier
+            )
             chain  = PromptTemplate.from_template(self._template) | self._base_llm
             result = chain.invoke({
                 "language":        language,
