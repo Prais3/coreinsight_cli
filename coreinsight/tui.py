@@ -36,7 +36,7 @@ from coreinsight.config import (
     is_pro,
     get_tier_limits,
     PRO_WAITLIST_URL,
-)9*96+96
+)
 from coreinsight.memory import OptimizationMemory
 
 # ---------------------------------------------------------------------------
