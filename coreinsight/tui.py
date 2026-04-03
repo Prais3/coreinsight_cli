@@ -70,24 +70,12 @@ class TuiConsole:
 
     # Main output method — handles str, Rich renderables, Panel, etc.
     def print(self, *args, **kwargs):
-        from rich.text import Text
-        from rich.markup import escape as _escape
         with self._lock:
             for arg in args:
                 try:
-                    # Rich renderables (Panel, Table, Text) go direct — they
-                    # already know how to render themselves safely.
-                    # Plain strings get escaped so LLM markdown like **bold**
-                    # or [brackets] don't corrupt the Rich markup parser.
-                    if isinstance(arg, str):
-                        self._log.write(Text.from_markup(_escape(arg)))
-                    else:
-                        self._log.write(arg)
+                    self._log.write(arg)
                 except Exception:
-                    try:
-                        self._log.write(str(arg))
-                    except Exception:
-                        pass
+                    self._log.write(str(arg))
 
     # console.log() is used by _log() helper in main.py
     def log(self, *args, **kwargs):

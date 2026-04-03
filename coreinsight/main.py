@@ -605,11 +605,14 @@ def run_analysis(file_path: str, no_docker: bool = False, tui_console=None, stre
     # passed as markup strings — Text(style="dim") is always safe.
     elif stream_callback is None and tui_console is not None:
         from rich.text import Text as _Text
+        from rich.markup import escape as _escape
         def _tui_stream(token: str):
             try:
-                tui_console.print(_Text(token, style="dim"))
+                # Escape raw LLM tokens — they may contain brackets or
+                # markdown that would corrupt the Rich markup parser.
+                tui_console.print(_Text(_escape(token), style="dim"))
             except Exception:
-                pass  # never crash the worker thread over a display glitch
+                pass
         stream_callback = _tui_stream
 
     try:
