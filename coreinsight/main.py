@@ -72,12 +72,10 @@ def _check_speedup_success(success: bool, logs: str) -> bool:
         pass
     return False
 
-
 def _run_single_agent(
     func_name, original_code, language, context,
     hardware_target, sandbox, agent, tier_limits,
-    stream_callback: Optional[Callable[[str], None]] = None,
-):
+    stream_callback: Optional[Callable[[str], None]] = None):
     """
     Original single-agent pipeline.
     Returns (result, optimized_code, success, logs, plot_data, is_valid).
@@ -133,12 +131,10 @@ def _run_single_agent(
 
     return result, optimized_code, success, logs, plot_data, is_valid
 
-
 def _run_multi_agent(
     func_name, original_code, language, context,
     hardware_target, sandbox, multi_agents, tier_limits,
-    stream_callback: Optional[Callable[[str], None]] = None,
-):
+    stream_callback: Optional[Callable[[str], None]] = None):
     """
     Multi-agent pipeline.
     BottleneckAgent  → analysis
@@ -260,6 +256,8 @@ def process_function(func: dict, language: str, agent: AnalyzerAgent, sandbox: C
             else:
                 _log(func_name, "Generating correctness test cases...")
                 test_cases = agent.generate_test_cases(func_name, original_code, language, context, num_cases=tier_limits["num_test_cases"])
+            if memory:
+                memory.store_test_cases(original_code, test_cases)
             _log(func_name, "Running correctness verification in Docker sandbox...")
             verification = sandbox.verify(
                 csv_output=logs,
@@ -689,7 +687,12 @@ def run_analysis(file_path: str, no_docker: bool = False, tui_console=None, stre
             console.print(f"[red]Initialization Error:[/red] {e}")
             sys.exit(1)
 
-        mode_label = "[bold cyan]Multi-Agent[/bold cyan]" if agent_mode == "multi" else "[dim]Single-Agent[/dim]"
+        if agent_mode == "multi":
+            mode_label = "[bold cyan]Multi-Agent[/bold cyan]"
+        elif agent_mode == "auto":
+            mode_label = "[cyan]Auto[/cyan]"
+        else:
+            mode_label = "Single-Agent"
         console.print(f"[dim]⚙️  Agent mode: {mode_label}[/dim]")
 
         mem_count = memory.stats().get("count", 0)
@@ -853,6 +856,136 @@ def run_demo(lang: str = "python", no_docker: bool = False, tui_console=None):
 
     run_analysis(str(demo_dir / entry_file), no_docker=no_docker, tui_console=tui_console)
 
+def _run_test_cmd(func_name: str, no_docker: bool = False):
+    """
+    Re-run correctness verification for a stored optimized function.
+    LLM-free on all subsequent calls. On first call after an old analyze
+    run (before test case persistence was added), generates test cases
+    once via LLM and stores them so future calls need no LLM.
+    """
+    from coreinsight.memory import OptimizationMemory
+    from coreinsight.sandbox import CodeSandbox
+
+    mem    = OptimizationMemory()
+    record = mem.lookup_by_name(func_name)
+
+    if not record:
+        console.print(
+            f"[yellow]No memory record found for '[bold]{func_name}[/bold]'.[/yellow]\n"
+            f"[dim]Run [cyan]coreinsight analyze[/cyan] on a file containing this function first.[/dim]"
+        )
+        return
+
+    language       = record["language"]
+    original_code  = record["original_code"]
+    optimized_code = record["optimized_code"]
+    test_cases     = record["test_cases"]
+
+    console.print(Panel.fit(
+        f"Re-verifying [bold cyan]{func_name}[/bold cyan] ({language})",
+        border_style="cyan",
+    ))
+
+    if not optimized_code:
+        console.print("[red]Optimized code not found in memory store.[/red]")
+        return
+
+    # ── One-time LLM fallback for functions analyzed before test case persistence ──
+    if not test_cases:
+        console.print(
+            "[yellow]⚠  No test cases stored for this function.[/yellow]\n"
+            "[dim]Generating once via LLM — all future calls will be LLM-free...[/dim]"
+        )
+        try:
+            from coreinsight.analyzer import AnalyzerAgent
+            from coreinsight.config import get_model_tier, get_tier_limits
+            config     = load_config()
+            provider   = config.get("provider",   "ollama")
+            model_name = config.get("model_name", "llama3.2")
+            api_keys   = config.get("api_keys",   {})
+            model_tier = get_model_tier(provider, model_name)
+            tier_limits = get_tier_limits(config)
+            agent      = AnalyzerAgent(
+                provider=provider,
+                model_name=model_name,
+                api_keys=api_keys,
+                model_tier=model_tier,
+            )
+            test_cases = agent.generate_test_cases(
+                func_name, original_code, language,
+                context="",
+                num_cases=tier_limits["num_test_cases"],
+            )
+        except Exception as exc:
+            console.print(f"[red]LLM error generating test cases: {exc}[/red]")
+            return
+
+        if not test_cases:
+            console.print(
+                "[red]LLM returned no test cases. "
+                "Check your provider config with [cyan]coreinsight configure[/cyan].[/red]"
+            )
+            return
+
+        mem.store_test_cases(original_code, test_cases)
+        console.print(
+            f"[dim]✓ Generated and stored {len(test_cases)} test case(s). "
+            f"Future calls to [cyan]coreinsight test {func_name}[/cyan] need no LLM.[/dim]"
+        )
+
+    # ── Correctness sandbox — no LLM from this point ──────────────────────
+    sandbox = CodeSandbox(disabled=no_docker)
+
+    if language in ("cpp", "c++", "cuda"):
+        # C++/CUDA correctness harness is embedded by HarnessAgent at analysis
+        # time and cannot be reconstructed post-hoc. Show stored result instead.
+        meta         = record["meta"]
+        passed_cases = int(meta.get("correctness_cases", 0))
+        total_cases  = int(meta.get("total_cases", 0))
+        if total_cases > 0:
+            all_passed = passed_cases == total_cases
+            badge = "[bold green]✓ PASS[/bold green]" if all_passed else "[bold yellow]⚠ PARTIAL[/bold yellow]"
+            console.print(
+                f"{badge} — Stored result: "
+                f"{passed_cases}/{total_cases} test cases passed at analysis time."
+            )
+        else:
+            console.print(
+                "[dim]No stored correctness result for this function.[/dim]"
+            )
+        console.print(
+            "[dim]C++ re-verification requires re-running analysis. "
+            "Full results in [cyan]coreinsight memory[/cyan].[/dim]"
+        )
+        return
+
+    console.print(f"[dim]Running {len(test_cases)} test case(s) in Docker sandbox...[/dim]")
+
+    result = sandbox.verify_correctness_only(
+        original_code=original_code,
+        optimized_code=optimized_code,
+        original_func_name=func_name,
+        optimized_func_name=func_name,
+        test_cases=test_cases,
+        language=language,
+    )
+
+    if result.verified:
+        console.print(
+            f"[bold green]✓ PASS[/bold green] — "
+            f"{result.passed_cases}/{result.total_cases} test cases passed."
+        )
+    else:
+        console.print(
+            f"[bold red]✗ FAIL[/bold red] — "
+            f"{result.passed_cases}/{result.total_cases} test cases passed."
+        )
+        for failure in result.failures[:10]:
+            console.print(f"  [red]✗[/red] {failure}")
+
+    if result.details:
+        console.print(f"[dim]{result.details}[/dim]")
+
 def _run_memory_cmd(clear: bool, export_path: str = None, export_fmt: str = "csv"):
     from coreinsight.memory import OptimizationMemory, MEMORY_DIR
     import shutil
@@ -915,6 +1048,7 @@ def _run_memory_cmd(clear: bool, export_path: str = None, export_fmt: str = "csv
     table.add_column("Function",   justify="left",   style="bold white")
     table.add_column("Language",   justify="center", style="cyan",       width=10)
     table.add_column("Speedup",    justify="right",  style="bold green", width=9)
+    table.add_column("Tests",      justify="right",  style="green",      width=10)
     table.add_column("Severity",   justify="center",                     width=10)
     table.add_column("Issue",      justify="left",   style="dim white")
     table.add_column("HW Evidence",justify="left",   style="dim",        width=22)
@@ -935,19 +1069,23 @@ def _run_memory_cmd(clear: bool, export_path: str = None, export_fmt: str = "csv
     )
 
     for i, (meta, rid) in enumerate(paired, start=1):
-        sev   = meta.get("severity", "High")
-        sev_c = severity_colors.get(sev, "white")
-        ts    = meta.get("timestamp", "")[:19].replace("T", " ")
-        hw    = meta.get("profiler_summary", "") or "—"
-        issue = (meta.get("issue", "") or "—")[:60]
+        sev      = meta.get("severity", "High")
+        sev_c    = severity_colors.get(sev, "white")
+        ts       = meta.get("timestamp", "")[:19].replace("T", " ")
+        hw       = meta.get("profiler_summary", "") or "—"
+        issue    = (meta.get("issue", "") or "—")[:60]
         if len(meta.get("issue", "")) > 60:
             issue += "…"
+        passed_c = int(meta.get("correctness_cases", 0))
+        total_c  = int(meta.get("total_cases", 0))
+        tests_str = f"{passed_c}/{total_c}" if total_c > 0 else "—"
 
         table.add_row(
             str(i),
             meta.get("func_name", rid[:12]),
             meta.get("language", "?"),
             f"{float(meta.get('avg_speedup', 0)):.2f}x",
+            tests_str,
             f"[{sev_c}]{sev}[/{sev_c}]",
             issue,
             hw,
@@ -1005,6 +1143,11 @@ def main_cli():
     scan_parser.add_argument("--dir", default=".", help="Directory to scan")
     scan_parser.add_argument("--top", type=int, default=10, help="Number of hotspots to show")
     
+    test_parser = subparsers.add_parser("test", help="Re-run verification sandbox for a stored function")
+    test_parser.add_argument("func_name", help="Name of the function to re-verify")
+    test_parser.add_argument("--no-docker", dest="no_docker", action="store_true",
+                             help="Skip Docker (will report skipped)")
+
     args = parser.parse_args()
     
     if args.command == "configure":
@@ -1024,6 +1167,11 @@ def main_cli():
             clear=getattr(args, "clear", False),
             export_path=getattr(args, "export_path", None),
             export_fmt=getattr(args, "export_fmt", "csv"),
+        )
+    elif args.command == "test":
+        _run_test_cmd(
+            func_name=args.func_name,
+            no_docker=getattr(args, "no_docker", False),
         )
     elif args.command == "scan":
         scanner = ProjectScanner(args.dir)
