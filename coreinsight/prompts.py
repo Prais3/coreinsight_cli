@@ -90,7 +90,8 @@ GRADING RUBRIC AND INSTRUCTIONS (APPLY ONLY THE SPECIFIC RUBRIC FOR {language}):
 INSTRUCTIONS:
 1. Actively hunt for Medium, High, and Critical issues based ONLY on the specific {language} rubric above. Do not hallucinate GPU concepts for Python code unless PyTorch/CUDA is explicitly used.
 2. If you find an issue, you MUST explain the hardware-level or interpreter-level reasoning clearly (e.g., CPU cache misses, GIL contention, memory latency).
-3. CODE GENERATION MANDATE: You MUST provide the completely rewritten, optimized function in the `optimized_code` field. The code must be raw, syntactically correct {language} code ready to be compiled/run. Do NOT leave this field empty. Do NOT wrap the code in markdown backticks (e.g., ```cpp) inside the JSON string.
+3. SEVERITY BIAS: When uncertain between two severity levels, always choose the higher one. A false negative (missing a real bottleneck) is always worse than a false positive. Only assign Low severity if you can explicitly prove the algorithm is already optimal for the target hardware — state the time complexity, memory access pattern, and why no better approach exists. "No obvious issues" is NOT sufficient justification for Low.
+4. CODE GENERATION MANDATE: You MUST provide the completely rewritten, optimized function in the `optimized_code` field. The code must be raw, syntactically correct {language} code ready to be compiled/run. Do NOT leave this field empty. Do NOT wrap the code in markdown backticks (e.g., ```cpp) inside the JSON string.
 """
 
 # ---------------------------------------------------------------------------
@@ -143,10 +144,10 @@ GRADING RUBRIC (apply only the {language} section):
 - Low: Trivial stylistic issues only.
 
 INSTRUCTIONS:
-1. Identify the single most impactful bottleneck — do not list everything, find the root cause.
-2. Explain the hardware-level or interpreter-level reasoning precisely.
-3. Set `optimized_code` to null — code generation happens in a separate agent.
-4. If the code is genuinely optimal, set severity to Low and explain why.
+1. Identify the single most impactful bottleneck — do not list everything, find the root cause. If no Critical or High issue exists, identify the most significant Medium issue. Do NOT default to Low out of uncertainty.
+2. Explain the hardware-level or interpreter-level reasoning precisely — name the specific mechanism (e.g., "O(N²) comparisons cause cache thrashing on arrays larger than L2 cache", "GIL held across network I/O blocks all threads").
+3. CRITICAL: Set `optimized_code` to null. Any non-null value in this field will corrupt the pipeline. Code generation is handled by a separate agent.
+4. SEVERITY BIAS: When uncertain between two severity levels, always choose the higher one. Only assign Low if you can explicitly prove algorithmic optimality — state the time complexity, memory access pattern, and why no better approach exists for the target hardware. "No obvious issues" is NOT sufficient justification for Low.
 
 {format_instructions}
 """
@@ -254,8 +255,9 @@ REQUIREMENTS:
 1. Rewrite ONLY the function named {func_name} — preserve its signature exactly.
 2. Fix the identified bottleneck using the suggestion as your guide.
 3. The function must be self-contained and correct.
-4. Raw {language} code only — no explanation, no markdown fences, no JSON.
-5. Do NOT rename the function.
+4. VERIFICATION: Before outputting, mentally confirm: does the rewrite directly eliminate the identified bottleneck? If the issue was O(N²), confirm the new complexity is O(N log N) or better. If the issue was a Python loop, confirm it is vectorized with NumPy/PyTorch. If the issue was a deep copy, confirm it is eliminated. Do not output a rewrite that only partially addresses the bottleneck.
+5. Raw {language} code only — no explanation, no markdown fences, no JSON.
+6. Do NOT rename the function.
 """
 
 # ── Per-tier addenda for multi-agent harness (same scaffolding pattern) ──────
