@@ -205,21 +205,78 @@ def process_function(func: dict, language: str, agent: AnalyzerAgent, sandbox: C
         _log(func_name, "Fetching RAG context...")
         context = indexer.get_context_for_code(original_code) if indexer else ""
 
-        # 0b. Memory lookup — skip LLM entirely if we've seen this pattern before
+        # 0b. Memory lookup — skip LLM if we've seen this pattern before,
+        # but validate the stored result before trusting it:
+        #   Gate A: no optimized code stored  → previous run was incomplete, re-run LLM
+        #   Gate B: correctness < 50% last run → keep analysis, re-run correctness only
+        #   Gate C: result is good             → return as-is
         if memory:
             memory_hit = memory.lookup(original_code, language)
             if memory_hit:
                 label = "exact match" if memory_hit.is_exact else f"similarity {memory_hit.similarity:.1%}"
-                _log(func_name, f"⚡ Recalled from memory ({label}) — skipping LLM", style="bold cyan")
-                recalled_result = {
-                    "severity":       memory_hit.severity,
-                    "issue":          memory_hit.issue,
-                    "reasoning":      memory_hit.reasoning,
-                    "optimized_code": memory_hit.optimized_code,
-                    "suggestion":     "",
-                    "bottlenecks":    [],
-                }
-                return func_name, recalled_result, None, None, None, None, memory_hit, False
+
+                # Gate A: stored result has no optimized code — not useful, fall through to LLM
+                if not memory_hit.optimized_code:
+                    _log(func_name, f"Memory hit ({label}) — no optimized code stored, re-running LLM", style="yellow")
+                    memory_hit = None   # fall through; LLM path runs below as normal
+
+                # Gate B: correctness was poor last time — re-run the correctness check only
+                elif memory_hit.total_cases > 0 and memory_hit.correctness_cases / memory_hit.total_cases < 0.5:
+                    _log(
+                        func_name,
+                        f"Memory hit ({label}) — correctness was "
+                        f"{memory_hit.correctness_cases}/{memory_hit.total_cases} last run, re-checking",
+                        style="yellow",
+                    )
+                    recalled_result = {
+                        "severity":       memory_hit.severity,
+                        "issue":          memory_hit.issue,
+                        "reasoning":      memory_hit.reasoning,
+                        "optimized_code": memory_hit.optimized_code,
+                        "suggestion":     "",
+                        "bottlenecks":    [],
+                    }
+                    new_verification = None
+                    if not getattr(sandbox, "disabled", False):
+                        stored_cases = memory.lookup_test_cases(original_code)
+                        if stored_cases:
+                            _log(func_name, "Re-running correctness sandbox with stored test cases...", style="dim")
+                            correctness = sandbox.verify_correctness_only(
+                                original_code=original_code,
+                                optimized_code=memory_hit.optimized_code,
+                                original_func_name=func_name,
+                                optimized_func_name=func_name,
+                                test_cases=stored_cases,
+                                language=language,
+                                context=context,
+                            )
+                            _log(func_name, f"Re-verification: {correctness.passed_cases}/{correctness.total_cases} passed", style="dim")
+                            try:
+                                from coreinsight.sandbox import VerificationResult, SpeedupVerification
+                                new_verification = VerificationResult(
+                                    speedup=SpeedupVerification(
+                                        verified=True,
+                                        computed_speedups=[memory_hit.avg_speedup] if memory_hit.avg_speedup else [],
+                                        details=f"Speedup recalled from memory: {memory_hit.avg_speedup:.2f}x",
+                                    ),
+                                    correctness=correctness,
+                                )
+                            except Exception:
+                                pass   # verification display is non-critical
+                    return func_name, recalled_result, None, None, new_verification, None, memory_hit, False
+
+                # Gate C: stored result is complete and correctness is acceptable
+                else:
+                    _log(func_name, f"⚡ Recalled from memory ({label}) — skipping LLM", style="bold cyan")
+                    recalled_result = {
+                        "severity":       memory_hit.severity,
+                        "issue":          memory_hit.issue,
+                        "reasoning":      memory_hit.reasoning,
+                        "optimized_code": memory_hit.optimized_code,
+                        "suggestion":     "",
+                        "bottlenecks":    [],
+                    }
+                    return func_name, recalled_result, None, None, None, None, memory_hit, False
 
         # ── Route: single-agent vs multi-agent ──────────────────────────
         if agent_mode == "multi" and multi_agents:
@@ -240,8 +297,37 @@ def process_function(func: dict, language: str, agent: AnalyzerAgent, sandbox: C
         if result is None:
             return func_name, None, None, f"❌ Analysis error: {logs}", None, None, None, False
 
+        # Retry gate: Low severity or missing optimized code often means the model
+        # defaulted to "looks fine" rather than truly auditing.
+        # Retry up to 2 times before accepting the conclusion.
+        _MAX_ANALYSIS_RETRIES = 2
+        _retry = 0
+        while (result.get("severity") == "Low" or not optimized_code) and _retry < _MAX_ANALYSIS_RETRIES:
+            _retry += 1
+            _log(func_name, f"Low/missing result — retrying analysis ({_retry}/{_MAX_ANALYSIS_RETRIES})...", style="yellow")
+            if agent_mode == "multi" and multi_agents:
+                result, optimized_code, success, logs, plot_data, is_valid_optimization = \
+                    _run_multi_agent(
+                        func_name, original_code, language, context,
+                        hardware_target, sandbox, multi_agents, tier_limits,
+                        stream_callback=stream_callback,
+                    )
+            else:
+                result, optimized_code, success, logs, plot_data, is_valid_optimization = \
+                    _run_single_agent(
+                        func_name, original_code, language, context,
+                        hardware_target, sandbox, agent, tier_limits,
+                        stream_callback=stream_callback,
+                    )
+            if result is None:
+                break
+
+        if result is None:
+            return func_name, None, None, f"❌ Analysis error after {_retry} retries: {logs}", None, None, None, False
+
         if result.get("severity") == "Low" or not optimized_code:
-            return func_name, None, None, "✅ No critical bottlenecks detected. Code is optimal.", None, None, None, False
+            confirmed = f" (confirmed after {_retry} retries)" if _retry > 0 else ""
+            return func_name, None, None, f"✅ No significant bottlenecks found{confirmed}.", None, None, None, False
 
         # 3. Verification + AI-free hardware profiling
         verification    = None
@@ -288,11 +374,29 @@ def process_function(func: dict, language: str, agent: AnalyzerAgent, sandbox: C
 
     except Exception as e:
         err_str = str(e)
-        if "context" in err_str.lower() and "limit" in err_str.lower():
-            _log(func_name, f"Context limit hit: {e}", style="bold yellow")
+        err_low  = err_str.lower()
+        if "context" in err_low and "limit" in err_low:
+            _log(func_name, "Context limit hit", style="bold yellow")
             return func_name, None, None, (
-                f"⚠️  Context limit: {err_str}\n"
-                f"Try a model with a larger context window, or split the function."
+                "⚠️  Context limit — try a model with a larger context window, "
+                "or split the function into smaller pieces."
+            ), None, None, None, False
+        if any(k in err_low for k in ("cannot connect", "connection refused", "docker")):
+            _log(func_name, "Docker unavailable", style="bold yellow")
+            return func_name, None, None, (
+                "⚠️  Docker is not running — start Docker Desktop and try again.\n"
+                "    Skip the sandbox with: coreinsight analyze --no-docker <file>"
+            ), None, None, None, False
+        if "timeout" in err_low or "timed out" in err_low:
+            _log(func_name, "Sandbox timed out", style="bold yellow")
+            return func_name, None, None, (
+                "⚠️  Sandbox timed out — the benchmark likely contains an infinite loop.\n"
+                "    The LLM analysis result above is still valid."
+            ), None, None, None, False
+        if "out of memory" in err_low or "oom" in err_low:
+            _log(func_name, "Sandbox OOM", style="bold yellow")
+            return func_name, None, None, (
+                "⚠️  Sandbox ran out of memory. Try --no-docker or reduce the file size."
             ), None, None, None, False
         _log(func_name, f"Failed: {e}", style="bold red")
         return func_name, None, None, f"❌ Analysis failed: {err_str}", None, None, None, False
@@ -763,7 +867,15 @@ def run_analysis(file_path: str, no_docker: bool = False, tui_console=None, stre
                     
                 except Exception as exc:
                     with print_lock:
-                        console.print(f"[bold red]❌ Critical failure in thread processing {func['name']}:[/bold red] {exc}")
+                        exc_low = str(exc).lower()
+                        if any(k in exc_low for k in ("docker", "cannot connect", "connection refused")):
+                            console.print(f"[bold yellow]⚠️  {func['name']}: Docker unavailable — start Docker Desktop and retry.[/bold yellow]")
+                        elif "timeout" in exc_low or "timed out" in exc_low:
+                            console.print(f"[bold yellow]⚠️  {func['name']}: Sandbox timed out.[/bold yellow]")
+                        elif "out of memory" in exc_low or "oom" in exc_low:
+                            console.print(f"[bold yellow]⚠️  {func['name']}: Sandbox ran out of memory.[/bold yellow]")
+                        else:
+                            console.print(f"[bold red]❌ {func['name']}: Unexpected error — {exc}[/bold red]")
 
         console.print(Panel.fit(f"✅ [bold green]Analysis Complete![/bold green] Final report saved to:\n{report_path.absolute()}"))
 

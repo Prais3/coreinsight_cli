@@ -150,6 +150,35 @@ class VerificationResult:
         return "\n".join(lines)
 
 
+def _format_sandbox_error(exc: Exception, language: str = "") -> str:
+    """Map raw Docker / OS exceptions to user-friendly one-liners."""
+    msg = str(exc).lower()
+    if "timeout" in msg or "timed out" in msg or "read timeout" in msg:
+        return (
+            "⚠️ Sandbox timed out — the benchmark likely contains an infinite loop "
+            "or extremely slow path. Try --no-docker to skip the sandbox."
+        )
+    if "out of memory" in msg or "oom" in msg or ("memory" in msg and "kill" in msg):
+        return (
+            "⚠️ Sandbox ran out of memory (OOM). "
+            "Reduce N sizes in the harness or use --no-docker."
+        )
+    if "no such image" in msg or "pull access" in msg or "not found" in msg:
+        lang_label = f" ({language})" if language else ""
+        return (
+            f"⚠️ Sandbox Docker image not found{lang_label}. "
+            "It should have been built on first run — try `docker images` to check."
+        )
+    if "cannot connect" in msg or "connection refused" in msg or "docker" in msg:
+        return (
+            "⚠️ Docker is not running. "
+            "Start Docker Desktop (or the Docker daemon) and try again."
+        )
+    if "permission denied" in msg:
+        return "⚠️ Sandbox permission error — Docker may lack access to the temp directory."
+    return f"⚠️ Sandbox error: {exc}"
+
+
 class CodeSandbox:
     def __init__(self, disabled: bool = False):
         self.disabled = disabled
@@ -277,7 +306,7 @@ class CodeSandbox:
                     return False, f"Missing CSV output (exit {exit_code}).\nFull output:\n{raw_logs}", None
 
             except Exception as e:
-                return False, f"Sandbox error: {str(e)}", None
+                return False, _format_sandbox_error(e, language), None
 
             finally:
                 if container:

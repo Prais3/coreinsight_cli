@@ -332,6 +332,16 @@ class OptimizationMemory:
         except Exception as exc:
             return {"count": 0, "error": str(exc)}
 
+    def lookup_test_cases(self, original_code: str) -> Optional[list]:
+        """
+        Return stored test cases for `original_code`, or None if not found.
+        Used to re-run correctness without regenerating via LLM.
+        """
+        if not self._ensure_db():
+            return None
+        h = self.ast_hash(original_code)
+        return self._load_test_cases(h)
+
     def store_test_cases(self, original_code: str, test_cases: list) -> None:
         """
         Persist test cases for a function, keyed by AST hash.
