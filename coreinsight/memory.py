@@ -85,9 +85,10 @@ class OptimizationMemory:
                 import chromadb
             except Exception as sqlite_exc:
                 self._init_error = (
-                    f"ChromaDB unavailable (likely outdated SQLite): {sqlite_exc}. "
+                    f"ChromaDB unavailable: {sqlite_exc}. "
                     "Optimization memory disabled. "
-                    "Fix: pip install coreinsight-cli[compat]"
+                    "Fix: pip install coreinsight-cli[memory] "
+                    "(or [compat] if you have an outdated SQLite)"
                 )
                 return False
 

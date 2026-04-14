@@ -9,7 +9,23 @@ CoreInsight finds hardware bottlenecks in your code, generates optimized replace
 ## Install
 
 ```bash
+# OpenAI key - quick install
+pip install coreinsight-cli[openai]
+
+# Gemini key - quick install
+pip install coreinsight-cli[google]
+
+# Claude key - quick install
+pip install coreinsight-cli[anthropic]
+
+# Local Ollama install
 pip install coreinsight-cli
+
+# Memory and additional usage install
+pip install coreinsight-cli[openai,memory]
+
+# Install everything
+pip install coreinsight-cli[all]
 ```
 
 **Requirements:** Python 3.9+ · Docker Desktop · [Ollama](https://ollama.com/download) (for local inference)

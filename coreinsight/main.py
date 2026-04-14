@@ -161,7 +161,6 @@ def _run_multi_agent(
     optimized_code = multi_agents["optimizer"].generate(
         func_name, original_code, result,
         language, context, hardware_target,
-        stream_callback=stream_callback,  # readable code, stream it
     )
     if not optimized_code or optimized_code == original_code:
         return result, None, False, "", None, False
