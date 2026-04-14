@@ -87,7 +87,9 @@ Print ONLY this exact CSV to stdout, no other text:
 N,Original_Time,Optimized_Time,Speedup
 10,0.002,0.001,2.00
 
-[PYTHON ONLY]: Also import matplotlib, plot results, and save as `benchmark_plot.png`.
+LANGUAGE REMINDER: You are writing {language} code. 
+- If {language} is "python": use `import time`, `time.perf_counter()`, Python syntax.
+- If {language} is "cpp" or "c++": use `#include`, `std::chrono`, C++ syntax. NO Python imports. NO `#` comments.
 
 FORMATTING RULE: Wrap your ENTIRE script in a single markdown code block. No text before or after.
 """
@@ -116,7 +118,8 @@ FIX INSTRUCTIONS:
 2. Fix imports, NameErrors, type mismatches, infinite loops, or OOM issues.
 3. Maintain the CSV stdout format exactly: N,Original_Time,Optimized_Time,Speedup
 4. Use high-resolution timers and clamp with `max(t, 1e-9)`.
-5. [PYTHON ONLY]: Save benchmark plot as `benchmark_plot.png`.
+5. If language is python: save benchmark plot as benchmark_plot.png using matplotlib.
+6. If language is cpp or c++: ensure ALL required headers included — #include <iostream>, #include <chrono>, #include <vector>.
 
 FORMATTING RULE: Wrap your ENTIRE fixed script in a single markdown code block. No text before or after.
 """
@@ -154,12 +157,16 @@ ISOLATION RULES (CRITICAL — runs in empty Docker container):
 - NO local files. No internet access.
 - DO NOT rename the original function — call it exactly {func_name}.
 
+C++ REQUIRED HEADERS (always include ALL of these for C++):
+#include <iostream>
+#include <chrono>
+#include <vector>
+#include <cmath>
+
 OUTPUT FORMAT (CRITICAL):
 Print ONLY this exact CSV to stdout:
 N,Original_Time,Optimized_Time,Speedup
 10,0.002,0.001,2.00
-
-[PYTHON ONLY]: Import matplotlib, plot results, save as benchmark_plot.png.
 
 FORMATTING RULE: Wrap your ENTIRE script in a single markdown code block. No text before or after.
 """
@@ -189,7 +196,8 @@ FIX INSTRUCTIONS:
 2. Fix imports, NameErrors, type mismatches, infinite loops, or OOM issues.
 3. Maintain exact CSV stdout format: N,Original_Time,Optimized_Time,Speedup
 4. Use high-resolution timers and clamp with max(t, 1e-9).
-5. [PYTHON ONLY]: Save benchmark plot as benchmark_plot.png.
+5. If language is python: save benchmark plot as benchmark_plot.png using matplotlib.
+6. If language is cpp or c++: ensure ALL required headers are included — #include <iostream>, #include <chrono>, #include <vector>.
 
 FORMATTING RULE: Wrap your ENTIRE fixed script in a single markdown code block. No text before or after.
 """
@@ -197,33 +205,57 @@ FORMATTING RULE: Wrap your ENTIRE fixed script in a single markdown code block. 
 # ── Single-agent harness addenda (per tier) ──────────────────────────────────
 HARNESS_ADDENDUM = {
     ModelTier.SMALL: """
+LANGUAGE RULE — THIS OVERRIDES EVERYTHING ELSE:
+- language=python → write Python. `import time`. `#` for comments. `def` for functions.
+- language=cpp → write C++. `//` for comments. No `import`. No `def`. No `#` comments.
+
 CRITICAL RULES:
-1. The functions are already written above under "ORIGINAL FUNCTION" and "OPTIMIZED FUNCTION".
-   Copy them into your script WORD FOR WORD. Do NOT use stubs or placeholders.
-2. Look at the function signature carefully and generate realistic dummy arguments that match it.
-   Do NOT assume every function takes a single list — check the actual parameter names and types.
-3. Sandbox has NO internet — stdlib only, no pip installs.
-4. Print the CSV header FIRST, then one row per N. If any N crashes, print a row of zeros for it
-   and continue — never let one bad N kill the whole script.
+1. Copy both functions WORD FOR WORD. No stubs or placeholders.
+0. If language=cpp: you MUST include `int main()` — C++ will not link without it.
+2. Generate realistic dummy args matching the function signature scaled to N.
+3. No internet. No pip installs.
+4. Print CSV header first. If any N crashes, print zeros and continue.
 
-STRUCTURE (replace ALL-CAPS placeholders with real code):
-  [copy original function here verbatim]
-  [copy optimized function here verbatim]
+PYTHON STRUCTURE EXAMPLE (only if language=python):
+    import time
+    print("N,Original_Time,Optimized_Time,Speedup")
+    for N in [10, 100, 1000, 5000]:
+        args = [list(range(N))]
+        try:
+            start = time.perf_counter()
+            original_fn(*args)
+            orig = max(time.perf_counter() - start, 1e-9)
+            start = time.perf_counter()
+            optimized_fn(*args)
+            opt = max(time.perf_counter() - start, 1e-9)
+            print(f"{N},{orig:.6f},{opt:.6f},{orig/opt:.4f}")
+        except Exception as e:
+            print(f"{N},0.0,0.0,0.0")
 
-  import time
-  print("N,Original_Time,Optimized_Time,Speedup")
-  for N in [10, 100, 1000, 5000]:
-      [generate dummy args matching the function signature, scaled to N]
-      try:
-          start = time.perf_counter()
-          [call original function with those args]
-          orig = max(time.perf_counter() - start, 1e-9)
-          start = time.perf_counter()
-          [call optimized function with those args]
-          opt = max(time.perf_counter() - start, 1e-9)
-          print(f"{{N}},{{orig:.6f}},{{opt:.6f}},{{orig/opt:.4f}}")
-      except Exception as e:
-          print(f"{{N}},0.0,0.0,0.0")
+CPP STRUCTURE EXAMPLE (only if language=cpp or c++):
+    #include <iostream>
+    #include <chrono>
+    #include <vector>
+    #include <cmath>
+    // paste original function here verbatim
+    // paste optimized function here verbatim
+    // YOU MUST HAVE int main() — C++ will not compile without it
+    int main() {
+        std::cout << "N,Original_Time,Optimized_Time,Speedup" << std::endl;
+        for (int N : {10, 100, 1000, 5000}) {
+            std::vector<int> data(N, 1);
+            auto t1 = std::chrono::high_resolution_clock::now();
+            original_fn(data);
+            auto t2 = std::chrono::high_resolution_clock::now();
+            double orig = std::max(std::chrono::duration<double>(t2-t1).count(), 1e-9);
+            auto t3 = std::chrono::high_resolution_clock::now();
+            optimized_fn(data);
+            auto t4 = std::chrono::high_resolution_clock::now();
+            double opt = std::max(std::chrono::duration<double>(t4-t3).count(), 1e-9);
+            std::cout << N << "," << orig << "," << opt << "," << orig/opt << std::endl;
+        }
+        return 0;
+    }
 """,
     ModelTier.MEDIUM: """
 REMINDERS:
@@ -231,12 +263,16 @@ REMINDERS:
 - Generate data of length N, never index by N
 - CSV header must be printed before data rows
 """,
-    ModelTier.LARGE: "",
+    ModelTier.LARGE: "If language is python, also save a benchmark plot as benchmark_plot.png using matplotlib.",
 }
 
 # ── Multi-agent harness addenda (per tier) ───────────────────────────────────
 HARNESS_ADDENDUM_MULTI = {
     ModelTier.SMALL: """
+LANGUAGE RULE — READ THIS FIRST:
+- If language is python: write Python. Use `import time`. Use `#` for comments. Do NOT write C++ syntax.
+- If language is cpp or c++: write C++. Start with #include <iostream>, #include <chrono>, #include <vector>. Use // for comments. NEVER write `import`. NEVER use `#` for Python-style comments.
+
 CRITICAL RULES:
 1. Copy both functions WORD FOR WORD — no stubs or placeholders.
 2. Check the function signature — do NOT assume every function takes a single list.
@@ -248,6 +284,8 @@ REMINDERS:
 - Paste both functions inline before calling them
 - Generate data of length N, never index by N
 - Print CSV header before data rows
+- If language is python: save benchmark plot as benchmark_plot.png using matplotlib.
+- If language is cpp or c++: include #include <iostream>, #include <chrono>, #include <vector>.
 """,
-    ModelTier.LARGE: "",
+    ModelTier.LARGE: "If language is python, also save a benchmark plot as benchmark_plot.png using matplotlib.",
 }

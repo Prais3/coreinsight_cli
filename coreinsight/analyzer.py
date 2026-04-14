@@ -106,70 +106,15 @@ class AnalyzerAgent:
         self.provider = provider
         api_keys = api_keys or {}
 
-        if provider == "openai":
-            if not api_keys.get("openai"):
-                raise ValueError("OpenAI API Key required.")
-            self.base_llm = ChatOpenAI(
-                model=model_name,
-                api_key=api_keys["openai"],
-                temperature=0.1,
-                model_kwargs={"response_format": {"type": "json_object"}},
-            )
-            self.json_llm = self.base_llm
-
+        # Reuse shared LLM factory — handles lazy imports and provider validation
+        from coreinsight.prompts import ModelTier
+        if provider == "ollama":
+            api_keys["_ctx"]     = 4096 if model_tier == ModelTier.SMALL else 8192
+            api_keys["_predict"] = 2048 if model_tier == ModelTier.SMALL else 4096
         elif provider == "local_server":
-            from coreinsight.prompts import ModelTier
-            base_url   = api_keys.get("local_url", "http://localhost:1234/v1")
-            _max_tokens = 2048 if model_tier == ModelTier.SMALL else 4096
-            self.base_llm = ChatOpenAI(
-                model=model_name,
-                api_key="not-needed",
-                base_url=base_url,
-                temperature=0.1,
-                max_tokens=_max_tokens,
-                model_kwargs={"response_format": {"type": "json_object"}},
-            )
-            self.json_llm = self.base_llm
-
-        elif provider == "anthropic":
-            if not api_keys.get("anthropic"):
-                raise ValueError("Anthropic API Key required.")
-            self.base_llm = ChatAnthropic(
-                model=model_name,
-                api_key=api_keys["anthropic"],
-                temperature=0.1,
-            )
-            # Anthropic doesn't support response_format; JSON is enforced via prompt only
-            self.json_llm = self.base_llm
-
-        elif provider == "google":
-            if not api_keys.get("google"):
-                raise ValueError("Google Gemini API Key required.")
-            self.base_llm = ChatGoogleGenerativeAI(
-                model=model_name,
-                google_api_key=api_keys["google"],
-                temperature=0.1,
-                convert_system_message_to_human=True,
-            )
-            self.json_llm = self.base_llm
-
-        else:  # Ollama default
-            from coreinsight.prompts import ModelTier
-            # Small models (7B) typically have 4096 native context.
-            # Asking for more causes silent degradation or OOM on the host.
-            # Medium/large local models can handle 8192 comfortably.
-            _ctx = 4096 if model_tier == ModelTier.SMALL else 8192
-            # num_predict: small models need room for JSON + code in one shot.
-            # Capping at 2048 for small prevents runaway generation that hits
-            # the limit mid-JSON and returns truncated garbage.
-            _predict = 2048 if model_tier == ModelTier.SMALL else 4096
-            self.base_llm = ChatOllama(
-                model=model_name,
-                temperature=0.1,
-                num_predict=_predict,
-                num_ctx=_ctx,
-            )
-            self.json_llm = self.base_llm.bind(format="json")
+            api_keys["_predict"] = 2048 if model_tier == ModelTier.SMALL else 4096
+            
+        self.base_llm, self.json_llm = _build_llm(provider, model_name, api_keys)
 
         self.prompt = PromptTemplate(
             template=ANALYSIS_TEMPLATE + "\n\n{format_instructions}",
@@ -804,7 +749,13 @@ class HarnessAgent:
         except Exception as e:
             return False, f"Harness generation failed: {e}", None, 0
 
-        success, logs, plot_data = sandbox.execute_benchmark(harness, language)
+        # Catch missing int main() before hitting the sandbox
+        if language in ("cpp", "c++") and "int main(" not in harness and "int main (" not in harness:
+            logs     = "Missing CSV output (exit 1).\nFull output:\nundefined reference to `main'"
+            success  = False
+            plot_data = None
+        else:
+            success, logs, plot_data = sandbox.execute_benchmark(harness, language)
         is_valid  = self._check_speedup(success, logs)
         retries   = 0
 
@@ -827,7 +778,12 @@ class HarnessAgent:
                 logs += f"\nFix generation failed: {e}"
                 break
 
-            success, logs, plot_data = sandbox.execute_benchmark(harness, language)
+            if language in ("cpp", "c++") and "int main(" not in harness and "int main (" not in harness:
+                logs      = "Missing CSV output (exit 1).\nFull output:\nundefined reference to `main'"
+                success   = False
+                plot_data = None
+            else:
+                success, logs, plot_data = sandbox.execute_benchmark(harness, language)
             is_valid = self._check_speedup(success, logs)
             retries += 1
 
