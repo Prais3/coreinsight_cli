@@ -161,7 +161,6 @@ def _run_multi_agent(
     optimized_code = multi_agents["optimizer"].generate(
         func_name, original_code, result,
         language, context, hardware_target,
-        stream_callback=stream_callback,  # readable code, stream it
     )
     if not optimized_code or optimized_code == original_code:
         return result, None, False, "", None, False
@@ -875,7 +874,8 @@ def run_analysis(file_path: str, no_docker: bool = False, tui_console=None, stre
                         elif "out of memory" in exc_low or "oom" in exc_low:
                             console.print(f"[bold yellow]⚠️  {func['name']}: Sandbox ran out of memory.[/bold yellow]")
                         else:
-                            console.print(f"[bold red]❌ {func['name']}: Unexpected error — {exc}[/bold red]")
+                            from rich.markup import escape
+                            console.print(f"[bold red]❌ {func['name']}: Unexpected error — {escape(str(exc))}[/bold red]")
 
         console.print(Panel.fit(f"✅ [bold green]Analysis Complete![/bold green] Final report saved to:\n{report_path.absolute()}"))
 
@@ -1029,7 +1029,8 @@ def _run_test_cmd(func_name: str, no_docker: bool = False):
                 num_cases=tier_limits["num_test_cases"],
             )
         except Exception as exc:
-            console.print(f"[red]LLM error generating test cases: {exc}[/red]")
+            from rich.markup import escape
+            console.print(f"[red]LLM error generating test cases: {escape(str(exc))}[/red]")
             return
 
         if not test_cases:
@@ -1146,7 +1147,8 @@ def _run_memory_cmd(clear: bool, export_path: str = None, export_fmt: str = "csv
         metadatas   = all_records.get("metadatas", []) or []
         ids         = all_records.get("ids",       []) or []
     except Exception as exc:
-        console.print(f"[red]Failed to read memory store: {exc}[/red]")
+        from rich.markup import escape
+        console.print(f"[red]Failed to read memory store: {escape(str(exc))}[/red]")
         return
 
     # Build the detail table

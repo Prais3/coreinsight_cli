@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "coreinsight-cli"
-version = "0.3.2"
+version = "0.3.3"
 description = "Local-first AI performance profiler that mathematically verifies optimizations for Python, C++, and CUDA"
 license = {text = "GPL-3.0-or-later"}
 authors = [
@@ -25,24 +25,45 @@ classifiers = [
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
+    # UI + system
     "rich>=13.0",
-    "docker>=6.0",
-    "tree-sitter==0.21.3",
-    "tree-sitter-languages",
-    "langchain>=0.2.0",
-    "langchain-core>=0.2.0",
-    "langchain-ollama>=0.1.0",
-    "langchain-google-genai>=1.0.0",
-    "langchain-openai>=0.1.0",
-    "langchain-anthropic>=0.1.0",
-    "pydantic>=2.0",
-    "chromadb>=0.5.0",
-    "sentence-transformers>=3.0.0",
     "textual>=0.60.0",
     "psutil>=5.9",
+    "pydantic>=2.0",
+    "docker>=6.0",
+    # LLM core + default local provider
+    "langchain-core>=0.2.0",
+    "langchain>=0.2.0",
+    "langchain-ollama>=0.1.0",
+    "langchain-openai>=0.1.0",
+    # Code parsing
+    "tree-sitter==0.21.3",
+    "tree-sitter-languages",
 ]
 
 [project.optional-dependencies]
+# Cloud providers — install only what you use
+openai    = []  # langchain-openai included in core; kept for backward compat
+google    = ["langchain-google-genai>=1.0.0"]
+anthropic = ["langchain-anthropic>=0.1.0"]
+
+# Optimization memory (pulls PyTorch via sentence-transformers — large download)
+memory = [
+    "chromadb>=0.5.0",
+    "sentence-transformers>=3.0.0",
+]
+
+# Convenience bundles
+cloud = [
+    "langchain-openai>=0.1.0",
+    "langchain-google-genai>=1.0.0",
+    "langchain-anthropic>=0.1.0",
+]
+all = [
+    "coreinsight-cli[cloud,memory]",
+]
+
+# SQLite compat for older systems
 compat = ["pysqlite3-binary>=0.5.0"]
 
 [tool.setuptools.packages.find]

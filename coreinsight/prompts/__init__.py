@@ -1,0 +1,59 @@
+"""
+coreinsight/prompts/__init__.py
+Public API — all existing imports continue to work unchanged.
+"""
+
+from coreinsight.prompts._base import ModelTier, SYSTEM_PROMPT
+from coreinsight.prompts.bottleneck import (
+    BOTTLENECK_TEMPLATE,
+    BOTTLENECK_TEMPLATE_SMALL,
+    BOTTLENECK_TEMPLATE_MEDIUM,
+    BOTTLENECK_TEMPLATE_LARGE,
+    BOTTLENECK_TEMPLATES,
+)
+from coreinsight.prompts.optimizer import (
+    OPTIMIZER_TEMPLATE,
+    OPTIMIZER_TEMPLATE_SMALL,
+    OPTIMIZER_TEMPLATE_MEDIUM,
+    OPTIMIZER_TEMPLATE_LARGE,
+    OPTIMIZER_TEMPLATES,
+)
+from coreinsight.prompts.harness import (
+    ANALYSIS_TEMPLATE,
+    HARNESS_TEMPLATE,
+    FIX_TEMPLATE,
+    HARNESS_TEMPLATE_MULTI,
+    FIX_TEMPLATE_MULTI,
+    HARNESS_ADDENDUM,
+    HARNESS_ADDENDUM_MULTI,
+)
+from coreinsight.prompts.test_cases import TEST_CASES_TEMPLATE
+
+# Backward-compatible alias — analyzer.py uses _TEST_CASES_TEMPLATE
+_TEST_CASES_TEMPLATE = TEST_CASES_TEMPLATE
+
+__all__ = [
+    "ModelTier",
+    "SYSTEM_PROMPT",
+    "BOTTLENECK_TEMPLATE",
+    "BOTTLENECK_TEMPLATE_SMALL",
+    "BOTTLENECK_TEMPLATE_MEDIUM",
+    "BOTTLENECK_TEMPLATE_LARGE",
+    "BOTTLENECK_TEMPLATES",
+    "OPTIMIZER_TEMPLATE",
+    "OPTIMIZER_TEMPLATE_SMALL",
+    "OPTIMIZER_TEMPLATE_MEDIUM",
+    "OPTIMIZER_TEMPLATE_LARGE",
+    "OPTIMIZER_TEMPLATES",
+    "HARNESS_TEMPLATE_MULTI",
+    "FIX_TEMPLATE_MULTI",
+    "HARNESS_ADDENDUM",
+    "HARNESS_ADDENDUM_MULTI",
+    "TEST_CASES_TEMPLATE",
+    "_TEST_CASES_TEMPLATE",
+]
+
+# Backward-compatible private aliases used in analyzer.py
+_HARNESS_TEMPLATE = HARNESS_TEMPLATE
+_FIX_TEMPLATE     = FIX_TEMPLATE
+_TEST_CASES_TEMPLATE = TEST_CASES_TEMPLATE
