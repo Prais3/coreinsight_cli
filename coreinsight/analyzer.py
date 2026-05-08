@@ -256,6 +256,13 @@ class AnalyzerAgent:
         hardware_target: str = "Generic CPU",
         stream_callback: Optional[Callable[[str], None]] = None,
     ) -> str:
+        from coreinsight.prompts import ModelTier
+        if language.lower() in ("cpp", "c++") and self.model_tier == ModelTier.SMALL:
+            raise ValueError(
+                f"C++ harness generation requires a MEDIUM or LARGE model "
+                f"(current tier: {self.model_tier}). "
+                "Switch to a 13B+ model (e.g. codellama:13b, mistral) for C++ support."
+            )
         try:
             context, original_code = _compress_for_small_model(
                 context, original_code, self.model_tier

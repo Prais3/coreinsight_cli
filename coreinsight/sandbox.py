@@ -39,6 +39,7 @@ import json, sys, math, importlib.util, traceback
 
 spec = importlib.util.spec_from_file_location("user_module", "/workspace/source.py")
 mod  = importlib.util.module_from_spec(spec)
+sys.modules["user_module"] = mod   # ← register BEFORE exec so @dataclass can resolve cls.__module__
 spec.loader.exec_module(mod)
 
 original_fn  = getattr(mod, "{original_func_name}",  None)

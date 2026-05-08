@@ -76,6 +76,10 @@ CRITICAL TIMING:
 - Python: use `time.perf_counter()`. C++: use `std::chrono::high_resolution_clock`.
 - Clamp: `orig_time = max(end - start, 1e-9)` to prevent zero-division.
 - Speedup: `speedup = orig_time / opt_time`.
+- TIME BUDGET: each individual timing call MUST complete within 0.5 seconds.
+  If the original function at N=1000 takes more than 0.5s, cap N at 500 or 100.
+  If a measurement exceeds 0.5s, print a row of zeros and continue — do NOT hang.
+- HARD CAP: maximum N is 10,000. Never exceed this regardless of RAM available.
 
 ISOLATION RULES (CRITICAL):
 - This runs in an empty Docker container. NO local files exist.
@@ -151,6 +155,8 @@ REQUIREMENTS:
 7. Use high-resolution timers: Python → time.perf_counter(), C++ → std::chrono::high_resolution_clock.
 8. Clamp: orig_time = max(end - start, 1e-9) to prevent zero-division.
 9. Speedup = orig_time / opt_time.
+10. TIME BUDGET: each timing call MUST complete within 0.5 seconds. If N=1000 is too slow, use N=500 or N=100 instead. Print zeros and continue if a run hangs — do NOT exceed the budget.
+11. HARD CAP: maximum N is 10,000. Never exceed this.
 
 ISOLATION RULES (CRITICAL — runs in empty Docker container):
 - NO local imports. Define everything inline.
@@ -215,6 +221,7 @@ CRITICAL RULES:
 2. Generate realistic dummy args matching the function signature scaled to N.
 3. No internet. No pip installs.
 4. Print CSV header first. If any N crashes, print zeros and continue.
+5. TIME LIMIT: each timing call must finish in under 0.5s. Use smaller N if needed. Max N = 10,000.
 
 PYTHON STRUCTURE EXAMPLE (only if language=python):
     import time
